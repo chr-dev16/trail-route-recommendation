@@ -40,7 +40,7 @@ for tile in tqdm(tiles.ll_tile):
     r.raise_for_status()
     out_fn = output_folder / Path(download_url).name
     if out_fn.exists():
-        printf("File {out_fn.name} exists already and is skipped")
+        print(f"File {out_fn.name} exists already and is skipped")
         continue
     with open(out_fn, "wb") as f:
         f.write(r.content)

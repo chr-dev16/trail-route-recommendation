@@ -63,12 +63,23 @@ def extract_worldcover_features(
     # Back to WGS84
     buffer = buffer_metric.to_crs(route_gdf.crs)
 
-    with rasterio.open(wc_tile) as wc_tile:
-        masked, out_transform = mask(wc_tile, buffer, crop=True)
+    wc_values = np.array([], dtype=np.uint8)
 
-    wc_values = masked[0]
+    for tile in tiles.ll_tile:
+        wc_tile = output_folder / f"ESA_WorldCover_10m_{worldcover_year}_{wc_version}_{tile}_Map.tif"
 
-    wc_values = wc_values[wc_values != 0] # 0 is not an actual worldcover class, but contains pixels that were cropped away due to "crop=True"
+        with rasterio.open(wc_tile) as src:
+            try:
+                masked, out_transform = mask(src, buffer, crop=True)
+
+                values = masked[0]
+                values = values[values != 0] # 0 is not an actual worldcover class, but contains pixels that were cropped away due to "crop=True"
+
+                wc_values = np.concatenate((wc_values, values))
+
+            except ValueError:
+                # Buffer does not overlap this tile
+                continue
 
     classes, counts = np.unique(wc_values, return_counts=True)
 

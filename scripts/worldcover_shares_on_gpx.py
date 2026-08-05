@@ -11,8 +11,8 @@ with open("../data/raw/gpx/pitz/p105-salomon-ultra-die-koenigsdistanz.gpx", "r")
 
 points = []
 
-for track in gpx.tracks:
-    for segment in track.segments:
+for track in gpx.tracks: # usually only 1 track in race GPX files, but not guaranteed
+    for segment in track.segments: # usually only 1 track in race GPX files, but not guaranteed
         for point in segment.points:
             points.append((point.longitude, point.latitude))
 

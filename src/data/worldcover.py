@@ -1,0 +1,82 @@
+from src.data.gpx import load_gpx
+import geopandas as gpd
+from pathlib import Path
+from shapely.geometry import box
+import requests
+from tqdm.auto import tqdm
+import rasterio
+from rasterio.mask import mask
+import numpy as np
+
+def extract_worldcover_features(
+    gpx_file_path: str,
+    buffer_metres: int = 20,
+    worldcover_year: int = 2021):
+
+    route_gdf = load_gpx(gpx_file_path)
+
+    # Extract GPX file bounding box
+    geom = box(
+        route_gdf.total_bounds[0],
+        route_gdf.total_bounds[1],
+        route_gdf.total_bounds[2],
+        route_gdf.total_bounds[3]
+    )
+
+    # Load worldcover grid
+    aws_url_prefix = "https://esa-worldcover.s3.eu-central-1.amazonaws.com"
+    url = f"{aws_url_prefix}/esa_worldcover_grid.geojson"
+    grid = gpd.read_file(url)
+
+    # get grid tiles intersecting box
+    tiles = grid[grid.intersects(geom)]
+
+    wc_version = {
+        2020: "v100",
+        2021: "v200",
+    }[worldcover_year]
+
+    output_folder = Path("../data/raw/worldcover")
+    output_folder.mkdir(parents=True, exist_ok=True)
+
+    print(f"Found {len(tiles)} WorldCover tiles.")
+
+    for tile in tqdm(tiles.ll_tile):
+        download_url = f"{aws_url_prefix}/{wc_version}/{worldcover_year}/map/ESA_WorldCover_10m_{worldcover_year}_{wc_version}_{tile}_Map.tif"
+        r = requests.get(download_url, allow_redirects=True)
+        r.raise_for_status()
+        out_fn = output_folder / Path(download_url).name
+        if out_fn.exists():
+            print(f"File {out_fn.name} exists already and is skipped")
+            continue
+        with open(out_fn, "wb") as f:
+            f.write(r.content)
+
+    print("Download completed.")
+
+    # Project GPX geo DataFrame to metric coordinate system
+    gdf_metric = route_gdf.to_crs(route_gdf.estimate_utm_crs())
+
+    # Generate buffer
+    buffer_metric = gdf_metric.buffer(buffer_metres)
+
+    # Back to WGS84
+    buffer = buffer_metric.to_crs(route_gdf.crs)
+
+    with rasterio.open(wc_tile) as wc_tile:
+        masked, out_transform = mask(wc_tile, buffer, crop=True)
+
+    wc_values = masked[0]
+
+    wc_values = wc_values[wc_values != 0] # 0 is not an actual worldcover class, but contains pixels that were cropped away due to "crop=True"
+
+    classes, counts = np.unique(wc_values, return_counts=True)
+
+    total = counts.sum()
+
+    features = {}
+
+    for cls, cnt in zip(classes, counts):
+        features[int(cls)] = cnt / total
+
+    return features

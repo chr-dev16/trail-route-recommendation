@@ -43,16 +43,16 @@ def extract_worldcover_features(
 
     for tile in tqdm(tiles.ll_tile):
         download_url = f"{aws_url_prefix}/{wc_version}/{worldcover_year}/map/ESA_WorldCover_10m_{worldcover_year}_{wc_version}_{tile}_Map.tif"
-        r = requests.get(download_url, allow_redirects=True)
-        r.raise_for_status()
         out_fn = output_folder / Path(download_url).name
         if out_fn.exists():
             print(f"File {out_fn.name} exists already and is skipped")
             continue
+        r = requests.get(download_url, allow_redirects=True)
+        r.raise_for_status()
         with open(out_fn, "wb") as f:
             f.write(r.content)
 
-    print("Download completed.")
+    print("All required WorldCover tiles available now.")
 
     # Project GPX geo DataFrame to metric coordinate system
     gdf_metric = route_gdf.to_crs(route_gdf.estimate_utm_crs())

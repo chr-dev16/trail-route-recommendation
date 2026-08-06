@@ -6,8 +6,17 @@ GPX_DIR = Path("../data/raw/gpx")
 results = []
 
 for gpx_file in GPX_DIR.rglob("*.gpx"): # Recursively iterate through all GPX files in the directory
-    features = extract_worldcover_features(gpx_file)
-    features["race"] = gpx_file.stem
+    print(f"Processing {gpx_file}")
+
+    try:
+        features = extract_worldcover_features(gpx_file)
+        features["route"] = gpx_file.stem
+
+        results.append(features)
+    except Exception as e:
+        print(f"Failed: {gpx_file}")
+        print(e)
+        continue
 
 df = pd.DataFrame(results)
 

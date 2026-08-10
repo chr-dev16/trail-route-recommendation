@@ -77,8 +77,9 @@ def extract_worldcover_features(
 
                 wc_values = np.concatenate((wc_values, values))
 
-            except ValueError:
-                # Buffer does not overlap this tile
+            except ValueError as e:
+                print(f"Buffer does not overlap this tile: {wc_tile}")
+                print(e)
                 continue
 
     classes, counts = np.unique(wc_values, return_counts=True)
@@ -87,7 +88,21 @@ def extract_worldcover_features(
 
     features = {}
 
+    WORLDCOVER_CLASSES = {
+        10: "tree_cover",
+        20: "shrubland",
+        30: "grassland",
+        40: "cropland",
+        50: "built_up",
+        60: "bare_sparse_vegetation",
+        70: "snow_ice",
+        80: "permanent_water",
+        90: "herbaceous_wetland",
+        95: "mangroves",
+        100: "moss_lichen",
+    }
+
     for cls, cnt in zip(classes, counts):
-        features[int(cls)] = cnt / total
+        features[WORLDCOVER_CLASSES[int(cls)]] = cnt / total
 
     return features

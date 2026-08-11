@@ -15,8 +15,16 @@ def extract_elevations(route_gdf: gpd.GeoDataFrame, dem: rasterio.io.DatasetRead
 
     return np.array(elevations)
 
-def compute_elevation_features(elevations: list[int]) -> dict[str, int]:
-    pass
+def compute_elevation_features(elevations: np.ndarray) -> dict[str, int]:
+
+    features = {
+        "min_elevation": np.min(elevations),
+        "max_elevation": np.max(elevations),
+        "mean_elevation": np.mean(elevations),
+        "std_elevation": np.std(elevations),
+    }
+
+    return features
 
 def extract_dem_features(gpx_file_path: Path,
                          dem_path: Path = Path("../data/raw/gedtm30/gedtm30_alps.tif")

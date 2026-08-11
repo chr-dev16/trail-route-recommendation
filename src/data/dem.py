@@ -1,15 +1,32 @@
 from src.data.gpx import load_gpx
-from shapely.geometry import box
+import geopandas as gpd
+from pathlib import Path
+import rasterio
+import numpy as np
 
-def extract_dem_features(
-    gpx_file_path: str):
+def extract_elevations(route_gdf: gpd.GeoDataFrame, dem: rasterio.io.DatasetReader) -> np.ndarray:
+
+    coordinates = list(route_gdf.geometry.iloc[0].coords)
+
+    elevations = []
+
+    for value in dem.sample(coordinates):
+        elevations.append(value[0])
+
+    return np.array(elevations)
+
+def compute_elevation_features(elevations: list[int]) -> dict[str, int]:
+    pass
+
+def extract_dem_features(gpx_file_path: Path,
+                         dem_path: Path = Path("../data/raw/gedtm30/gedtm30_alps.tif")
+                         ) -> dict[str, int]:
 
     route_gdf = load_gpx(gpx_file_path)
 
-    # Extract GPX file bounding box
-    geom = box(
-        route_gdf.total_bounds[0],
-        route_gdf.total_bounds[1],
-        route_gdf.total_bounds[2],
-        route_gdf.total_bounds[3]
-    )
+    with rasterio.open(dem_path) as dem:
+        elevations = extract_elevations(route_gdf, dem)
+    
+    features = compute_elevation_features(elevations)
+
+    return features

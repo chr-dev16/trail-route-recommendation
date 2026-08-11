@@ -1,8 +1,9 @@
 import gpxpy
 import geopandas as gpd
 from shapely.geometry import LineString
+from pathlib import Path
 
-def load_gpx(file_path: str):
+def load_gpx(file_path: Path):
     with open(file_path, "r") as file:
         gpx = gpxpy.parse(file)
 

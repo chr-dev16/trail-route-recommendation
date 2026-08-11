@@ -9,9 +9,9 @@ from rasterio.mask import mask
 import numpy as np
 
 def extract_worldcover_features(
-    gpx_file_path: str,
+    gpx_file_path: Path,
     buffer_metres: int = 20,
-    worldcover_year: int = 2021):
+    worldcover_year: int = 2021) -> dict[str,float|str]:
 
     route_gdf = load_gpx(gpx_file_path)
 

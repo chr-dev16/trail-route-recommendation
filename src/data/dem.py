@@ -17,11 +17,16 @@ def extract_elevations(route_gdf: gpd.GeoDataFrame, dem: rasterio.io.DatasetRead
 
 def compute_elevation_features(elevations: np.ndarray) -> dict[str, int]:
 
+    delta = np.diff(elevations)
+
     features = {
         "min_elevation": np.min(elevations),
         "max_elevation": np.max(elevations),
         "mean_elevation": np.mean(elevations),
         "std_elevation": np.std(elevations),
+        "elevation_range": np.max(elevations) - np.min(elevations),
+        "total_ascent": delta[delta > 0].sum(),
+        "total_descent": -delta[delta < 0].sum(),
     }
 
     return features

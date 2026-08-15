@@ -41,15 +41,14 @@ def compute_elevation_features(elevations: np.ndarray,
     return elevation_features
 
 def compute_slope_features(elevations: np.ndarray, 
-                           spacing_metres: float = 30) -> dict[str, float]:
+                           spacing_metres: float = 30,
+                           slope_window: int = 5) -> dict[str, float]:
 
-    window = 5
+    delta = elevations[slope_window:] - elevations[:-slope_window]
 
-    delta = elevations[window:] - elevations[:-window]
+    slope_percent = (delta / (spacing_metres * slope_window)) * 100
 
-    slope_percent = (delta / (spacing_metres * window)) * 100
-
-    distance_km = np.arange(window, len(elevations)) * spacing_metres / 1000
+    distance_km = np.arange(slope_window, len(elevations)) * spacing_metres / 1000
 
     uphill_slope = slope_percent[slope_percent > 0]
     downhill_slope = slope_percent[slope_percent < 0]

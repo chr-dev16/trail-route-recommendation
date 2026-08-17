@@ -4,7 +4,7 @@ from pathlib import Path
 import rasterio
 import numpy as np
 
-def extract_elevations(route_gdf: gpd.GeoDataFrame, dem: rasterio.io.DatasetReader) -> np.ndarray:
+def extract_dtm_raster_values(route_gdf: gpd.GeoDataFrame, dem: rasterio.io.DatasetReader) -> np.ndarray:
 
     route_dem_crs = route_gdf.to_crs(dem.crs)
 
@@ -70,6 +70,89 @@ def compute_slope_features(elevations: np.ndarray,
 
     return slope_features
 
+def compute_climb_features(
+    elevations: np.ndarray,
+    spacing_metres: float = 30,
+    slope_window: int = 5,
+    min_climb_length: float = 300) -> dict[str, float]:
+
+    # Calculate local slope over the 150-m window
+    delta = elevations[slope_window:] - elevations[:-slope_window]
+
+    slope_percent = (
+        delta / (spacing_metres * slope_window)
+    ) * 100
+
+    # Identify uphill sections (bool per section)
+    uphill = slope_percent > 0
+
+    # Find continuous uphill sections
+    climbs = []
+
+    start = None
+
+    for i, is_uphill in enumerate(uphill):
+
+        if is_uphill and start is None:
+            start = i
+
+        elif not is_uphill and start is not None:
+            end = i
+
+            length = (end - start) * spacing_metres
+
+            if length >= min_climb_length:
+                elevation_gain = (
+                    elevations[end - 1 + slope_window]
+                    - elevations[start]
+                )
+
+                climbs.append({
+                    "length": length,
+                    "elevation_gain": elevation_gain
+                })
+
+            start = None
+
+    if start is not None:
+
+        end = len(uphill)
+
+        length = (end - start) * spacing_metres
+
+        if length >= min_climb_length:
+            elevation_gain = (
+                elevations[end - 1 + slope_window]
+                - elevations[start]
+            )
+
+            climbs.append({
+                "length": length,
+                "elevation_gain": elevation_gain
+            })
+
+    if climbs:
+        lengths = np.array([climb["length"] for climb in climbs])
+        gains = np.array([climb["elevation_gain"] for climb in climbs])
+
+        return {
+            "number_of_climbs": len(climbs),
+            "total_climb_distance": lengths.sum(),
+            "mean_climb_length": lengths.mean(),
+            "max_climb_length": lengths.max(),
+            "mean_climb_elevation_gain": gains.mean(),
+            "max_climb_elevation_gain": gains.max(),
+        }
+    else:
+        return {
+            "number_of_climbs": 0,
+            "total_climb_distance": 0,
+            "mean_climb_length": 0,
+            "max_climb_length": 0,
+            "mean_climb_elevation_gain": 0,
+            "max_climb_elevation_gain": 0,
+        }
+
 def extract_dem_features(gpx_file_path: Path,
                          threshold_grid: list,
                          spacing_metres: float = 30,
@@ -86,5 +169,6 @@ def extract_dem_features(gpx_file_path: Path,
 
     features = compute_elevation_features(elevations, threshold_grid)
     features.update(compute_slope_features(elevations, spacing_metres=spacing_metres))
+    features.update(compute_climb_features(elevations))
 
     return features

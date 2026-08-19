@@ -4,21 +4,21 @@ from pathlib import Path
 import rasterio
 import numpy as np
 
-def extract_dtm_raster_values(route_gdf: gpd.GeoDataFrame, dem: rasterio.io.DatasetReader) -> np.ndarray:
+def extract_dtm_raster_values(route_gdf: gpd.GeoDataFrame, dtm: rasterio.io.DatasetReader) -> np.ndarray:
 
-    route_dem_crs = route_gdf.to_crs(dem.crs)
+    route_dtm_crs = route_gdf.to_crs(dtm.crs)
 
     coordinates = []
 
-    for point in route_dem_crs.geometry:
+    for point in route_dtm_crs.geometry:
         coordinates.append((point.x, point.y))
 
-    elevations = []
+    values = []
 
-    for value in dem.sample(coordinates):
-        elevations.append(value[0])
+    for value in dtm.sample(coordinates):
+        values.append(value[0])
 
-    return np.array(elevations)
+    return np.array(values)
 
 def compute_elevation_features(elevations: np.ndarray,
                                threshold_grid: list) -> dict[str, float]:
@@ -153,10 +153,20 @@ def compute_climb_features(
             "max_climb_elevation_gain": 0,
         }
 
+def compute_ssdon_features(
+    ssdon_values: np.ndarray
+) -> dict[str, float]:
+
+    return {
+        "mean_ssdon": np.mean(ssdon_values),
+        "p95_ssdon": np.percentile(ssdon_values, 95),
+    }
+
 def extract_dem_features(gpx_file_path: Path,
                          threshold_grid: list,
                          spacing_metres: float = 30,
                          dem_path: Path = Path("../data/raw/gedtm30/gedtm30_alps.tif"),
+                         ssdon_path: Path = Path("../data/raw/gedtm30/ssdon_gedtm30_alps.tif"),
                          ) -> dict[str, int]:
 
     route_gdf = load_gpx(gpx_file_path)
@@ -164,11 +174,13 @@ def extract_dem_features(gpx_file_path: Path,
     # Resample GPX route to regularly spaced points
     resampled_gdf = resample_route(route_gdf, spacing_metres=spacing_metres)
 
-    with rasterio.open(dem_path) as dem:
-        elevations = extract_elevations(resampled_gdf, dem)
+    with rasterio.open(dem_path) as dem, rasterio.open(ssdon_path) as ssdon:
+        elevations = extract_dtm_raster_values(resampled_gdf, dem)
+        ssdon_values = extract_dtm_raster_values(resampled_gdf, ssdon)
 
     features = compute_elevation_features(elevations, threshold_grid)
     features.update(compute_slope_features(elevations, spacing_metres=spacing_metres))
     features.update(compute_climb_features(elevations))
+    features.update(compute_ssdon_features(ssdon_values))
 
     return features

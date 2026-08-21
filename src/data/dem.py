@@ -162,11 +162,24 @@ def compute_ssdon_features(
         "p95_ssdon": np.percentile(ssdon_values, 95),
     }
 
+def compute_openness_features(
+    openness_values: np.ndarray,
+    reference: str,
+) -> dict[str, float]:
+
+    return {
+        f"mean_{reference}_openness": np.mean(openness_values),
+        f"p95_{reference}_openness": np.percentile(openness_values, 95),
+    }
+    
+
 def extract_dem_features(gpx_file_path: Path,
                          threshold_grid: list,
                          spacing_metres: float = 30,
                          dem_path: Path = Path("../data/raw/gedtm30/gedtm30_alps.tif"),
                          ssdon_path: Path = Path("../data/raw/gedtm30/ssdon_gedtm30_alps.tif"),
+                         positive_openness_path: Path = Path("../data/raw/gedtm30/positive_openness_gedtm30_alps.tif"),
+                         negative_openness_path: Path = Path("../data/raw/gedtm30/positive_openness_gedtm30_alps.tif"),
                          ) -> dict[str, int]:
 
     route_gdf = load_gpx(gpx_file_path)
@@ -174,13 +187,17 @@ def extract_dem_features(gpx_file_path: Path,
     # Resample GPX route to regularly spaced points
     resampled_gdf = resample_route(route_gdf, spacing_metres=spacing_metres)
 
-    with rasterio.open(dem_path) as dem, rasterio.open(ssdon_path) as ssdon:
+    with rasterio.open(dem_path) as dem, rasterio.open(ssdon_path) as ssdon, rasterio.open(positive_openness_path) as pos_openness, rasterio.open(negative_openness_path) as neg_openness:
         elevations = extract_dtm_raster_values(resampled_gdf, dem)
         ssdon_values = extract_dtm_raster_values(resampled_gdf, ssdon)
+        pos_openness_values = extract_dtm_raster_values(resampled_gdf, pos_openness)
+        neg_openness_values = extract_dtm_raster_values(resampled_gdf, neg_openness)
 
     features = compute_elevation_features(elevations, threshold_grid)
     features.update(compute_slope_features(elevations, spacing_metres=spacing_metres))
     features.update(compute_climb_features(elevations))
     features.update(compute_ssdon_features(ssdon_values))
+    features.update(compute_openness_features(pos_openness_values, "positive"))
+    features.update(compute_openness_features(neg_openness_values, "negative"))
 
     return features

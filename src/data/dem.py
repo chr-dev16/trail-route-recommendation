@@ -59,10 +59,12 @@ def compute_slope_features(elevations: np.ndarray,
         "p95_uphill_slope": np.percentile(uphill_slope, 95),
         "p95_downhill_slope": -np.percentile(downhill_slope, 5),
 
+        "fraction_uphill": np.mean(slope_percent > 0),
         "fraction_uphill_above_10percent": np.mean(slope_percent > 10),
         "fraction_uphill_above_20percent": np.mean(slope_percent > 20),
         "fraction_uphill_above_30percent": np.mean(slope_percent > 30),
 
+        "fraction_downhill": np.mean(slope_percent < 0),
         "fraction_downhill_above_10percent": np.mean(slope_percent < -10),
         "fraction_downhill_above_20percent": np.mean(slope_percent < -20),
         "fraction_downhill_above_30percent": np.mean(slope_percent < -30),

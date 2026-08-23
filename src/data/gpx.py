@@ -23,27 +23,32 @@ def load_gpx(file_path: Path):
     )
     return gdf
 
-def compute_ascent_descent(gpx_file_path: Path) -> dict[str, float]:
-    with open(gpx_file_path, "r") as file:
-        gpx = gpxpy.parse(file)
+def resample_route(route_gdf: gpd.GeoDataFrame, spacing_metres: int = 30) -> gpd.GeoDataFrame:
 
-    elevations = []
+    # Create route line from GPX points
+    line = route_gdf.geometry.iloc[0]
 
-    for track in gpx.tracks: # usually only 1 track in race GPX files, but not guaranteed
-        for segment in track.segments: # usually only 1 track in race GPX files, but not guaranteed
-            for point in segment.points:
-                if point.elevation is not None:
-                    elevations.append(point.elevation)
+    # Project to a metre-based Coordinate Reference System
+    route_metres_projected = gpd.GeoSeries([line], crs=route_gdf.crs).to_crs(
+        route_gdf.estimate_utm_crs()
+    )
 
-    elevations = np.array(elevations)
+    line_projected = route_metres_projected.iloc[0]
 
-    delta = np.diff(elevations)
+    # Generate distances along the route
+    distances = np.arange(0, line_projected.length, spacing_metres)
+    distances = np.append(distances, line_projected.length)
 
-    print(delta[:4])
+    # Create points
+    points = [
+        line_projected.interpolate(distance)
+        for distance in distances
+    ]
 
-    features = {
-        "total_ascent": delta[delta > 0].sum(),
-        "total_descent": -delta[delta < 0].sum(),
-    }
+    # Convert back to original Coordinate Reference System
+    resampled_gdf = gpd.GeoDataFrame(
+        geometry=points,
+        crs=route_metres_projected.crs
+    ).to_crs(route_gdf.crs)
 
-    return features
+    return resampled_gdf

@@ -181,7 +181,7 @@ def extract_dem_features(gpx_file_path: Path,
                          dem_path: Path = Path("../data/raw/gedtm30/gedtm30_alps.tif"),
                          ssdon_path: Path = Path("../data/raw/gedtm30/ssdon_gedtm30_alps.tif"),
                          positive_openness_path: Path = Path("../data/raw/gedtm30/positive_openness_gedtm30_alps.tif"),
-                         negative_openness_path: Path = Path("../data/raw/gedtm30/positive_openness_gedtm30_alps.tif"),
+                         negative_openness_path: Path = Path("../data/raw/gedtm30/negative_openness_gedtm30_alps.tif"),
                          ) -> dict[str, int]:
 
     route_gdf = load_gpx(gpx_file_path)

@@ -20,7 +20,7 @@ for gpx_file in GPX_DIR.rglob("*.gpx"): # Recursively iterate through all GPX fi
 
 df = pd.DataFrame(results)
 
-df.to_csv(
-    "../data/processed/worldcover_features.csv",
+df.to_excel(
+    "../data/processed/worldcover_features.xlsx",
     index=False
 )

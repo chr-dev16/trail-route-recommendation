@@ -1,13 +1,11 @@
 import streamlit as st
-from trail_route_recommendation.data.gpx import load_gpx
-#from trail_route_recommendation.matching.osm import (
-#    match_gpx_to_edges,
-#    get_matched_edges,
-#)
+from trail_route_recommendation.data.gpx import load_gpx, resample_route
+from trail_route_recommendation.matching.osm import match_gpx_to_edges
 import plotly.graph_objects as go
 import os
 import tempfile
 import osmnx as ox
+import numpy as np
 
 st.title("Trail Route Generation (dev)")
 
@@ -39,29 +37,19 @@ if uploaded_gpx or uploaded_graphml:
         if uploaded_gpx:
             route_gdf = load_gpx(uploaded_gpx)
 
-        for geometry in route_gdf.geometry:
-            lons, lats = geometry.xy
+            for geometry in route_gdf.geometry:
+                lons, lats = geometry.xy
 
-            traces.append(
-                go.Scatter(
-                    x=lons,
-                    y=lats,
-                    mode="lines",
-                    name="GPX trajectory",
-                    line=dict(width=4),
-                    hoverinfo="skip",
+                traces.append(
+                    go.Scatter(
+                        x=np.array(lons),
+                        y=np.array(lats),
+                        mode="lines",
+                        name="GPX trajectory",
+                        line=dict(width=4),
+                        hoverinfo="skip",
+                    )
                 )
-            )
-
-            st.subheader("GPX")
-            st.plotly_chart(
-                fig,
-                width="stretch",
-                config={"displaylogo": False},
-            )
-        else:
-            st.warning("No plottable data found.")
-
 
         # Plot GraphML edges using node coordinates
         if uploaded_graphml:
@@ -104,6 +92,43 @@ if uploaded_gpx or uploaded_graphml:
                     )
                 )
 
+        # Match resampled GPX points to graph edges
+        if uploaded_gpx and uploaded_graphml:
+            route_points = resample_route(
+                route_gdf,
+                spacing_metres=30,
+            )
+
+            matched_edges = match_gpx_to_edges(
+                route_points,
+                graph,
+            )
+
+            # Convert matched edges back to longitude/latitude for plotting
+            matched_edges = matched_edges.to_crs("EPSG:4326")
+
+            matched_lons = []
+            matched_lats = []
+
+            for geometry in matched_edges.geometry:
+                if geometry is not None:
+                    if geometry.geom_type == "LineString":
+                        lons, lats = geometry.xy
+                        matched_lons.extend([*lons, None])
+                        matched_lats.extend([*lats, None])
+
+            if matched_lons:
+                traces.append(
+                    go.Scatter(
+                        x=matched_lons,
+                        y=matched_lats,
+                        mode="lines",
+                        name="Matched edges",
+                        line=dict(width=3),
+                        hoverinfo="skip",
+                    )
+                )
+
         if traces:
             fig = go.Figure(traces)
 
@@ -126,6 +151,16 @@ if uploaded_gpx or uploaded_graphml:
                     scaleratio=1,
                 ),
             )
+
+            st.subheader("GPX and OSM graph")
+            st.plotly_chart(
+                fig,
+                width="stretch",
+                config={"displaylogo": False},
+            )
+        else:
+            st.warning("No plottable data found.")
+
 
     except Exception as e:
         st.error(f"Could not read the uploaded data: {e}")

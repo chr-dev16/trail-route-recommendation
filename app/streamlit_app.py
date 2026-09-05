@@ -1,10 +1,31 @@
 import streamlit as st
+import gpxpy
+import plotly.graph_objects as go
+import os
+import tempfile
+import osmnx as ox
 
 st.title("Trail Route Generation (dev)")
 
 st.write("Development/debugging interface for trail route generation.")
 
 st.sidebar.header("Route")
+
+uploaded_file = st.sidebar.file_uploader(
+    "Upload GPX file",
+    type=["gpx"]
+)
+
+uploaded_graphml = st.sidebar.file_uploader(
+    "Upload GraphML file",
+    type=["graphml"]
+)
+
+if uploaded_file:
+        st.success(f"Loaded GPX: {uploaded_file.name}")
+
+if uploaded_graphml:
+    st.success(f"Loaded GraphML: {uploaded_graphml.name}")
 
 races = [
     "Select a race...",

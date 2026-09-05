@@ -1,9 +1,6 @@
 import streamlit as st
-import gpxpy
+from trail_route_recommendation.data.gpx import load_gpx
 import plotly.graph_objects as go
-import os
-import tempfile
-import osmnx as ox
 
 st.title("Trail Route Generation (dev)")
 
@@ -11,7 +8,7 @@ st.write("Development/debugging interface for trail route generation.")
 
 st.sidebar.header("Route")
 
-uploaded_file = st.sidebar.file_uploader(
+uploaded_gpx = st.sidebar.file_uploader(
     "Upload GPX file",
     type=["gpx"]
 )
@@ -21,11 +18,45 @@ uploaded_graphml = st.sidebar.file_uploader(
     type=["graphml"]
 )
 
-if uploaded_file:
-        st.success(f"Loaded GPX: {uploaded_file.name}")
+if uploaded_gpx or uploaded_graphml:
+    if uploaded_gpx:
+        st.success(f"Loaded GPX: {uploaded_gpx.name}")
 
-if uploaded_graphml:
-    st.success(f"Loaded GraphML: {uploaded_graphml.name}")
+    if uploaded_graphml:
+        st.success(f"Loaded GraphML: {uploaded_graphml.name}")
+
+    try:
+        traces = []
+
+        # Plot GPX trajectory
+        if uploaded_gpx:
+            route_gdf = load_gpx(uploaded_gpx)
+
+        for geometry in route_gdf.geometry:
+            lons, lats = geometry.xy
+
+            traces.append(
+                go.Scatter(
+                    x=lons,
+                    y=lats,
+                    mode="lines",
+                    name="GPX trajectory",
+                    line=dict(width=4),
+                    hoverinfo="skip",
+                )
+            )
+
+            st.subheader("GPX")
+            st.plotly_chart(
+                fig,
+                width="stretch",
+                config={"displaylogo": False},
+            )
+        else:
+            st.warning("No plottable data found.")
+
+    except Exception as e:
+        st.error(f"Could not read the uploaded data: {e}")
 
 races = [
     "Select a race...",

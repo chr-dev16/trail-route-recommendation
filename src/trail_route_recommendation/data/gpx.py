@@ -1,12 +1,11 @@
 import gpxpy
 import geopandas as gpd
 from shapely.geometry import LineString
-from pathlib import Path
 import numpy as np
+from typing import IO
 
-def load_gpx(file_path: Path):
-    with open(file_path, "r") as file:
-        gpx = gpxpy.parse(file)
+def load_gpx(file: IO):
+    gpx = gpxpy.parse(file)
 
     points = []
 

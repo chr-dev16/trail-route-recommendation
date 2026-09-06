@@ -1,6 +1,6 @@
 import streamlit as st
 from trail_route_recommendation.data.gpx import load_gpx, resample_route
-from trail_route_recommendation.matching.osm import match_gpx_to_edges
+from trail_route_recommendation.data.osm import match_gpx_to_edges
 import plotly.graph_objects as go
 import os
 import tempfile
@@ -22,6 +22,35 @@ uploaded_graphml = st.sidebar.file_uploader(
     "Upload GraphML file",
     type=["graphml"]
 )
+
+osm_tags = [
+    "highway",
+    "surface",
+    "tracktype",
+    "sac_scale",
+    "smoothness",
+    "trail_visibility",
+    "mtb:scale",
+    "trailblazed",
+    "incline",
+    "step_count",
+    "width",
+    "informal",
+    "hazard",
+    "foot",
+    "access",
+    "barrier",
+    "bridge",
+    "tunnel",
+    "ford",
+]
+
+selected_tag = st.sidebar.selectbox(
+    "OSM tag",
+    ["None"] + osm_tags,
+)
+
+selected_values = []
 
 if uploaded_gpx or uploaded_graphml:
     if uploaded_gpx:
@@ -59,17 +88,36 @@ if uploaded_gpx or uploaded_graphml:
                 with os.fdopen(fd, "wb") as tmp:
                     tmp.write(uploaded_graphml.getvalue())
 
-                graph = ox.load_graphml(graph_path)
+                osm_graph = ox.load_graphml(graph_path)
 
             finally:
                 os.remove(graph_path)
 
+            if selected_tag != "None":
+                osm_edges = ox.graph_to_gdfs(
+                    osm_graph,
+                    nodes=False,
+                    edges=True,
+                )
+
+                tag_values = sorted(
+                    {
+                        str(value)
+                        for value in osm_edges[selected_tag].dropna()
+                    }
+                )
+
+                selected_values = st.sidebar.multiselect(
+                    "OSM tag value",
+                    tag_values,
+                )
+
             edge_lons = []
             edge_lats = []
 
-            for u, v in graph.edges():
-                node_u = graph.nodes[u]
-                node_v = graph.nodes[v]
+            for u, v in osm_graph.edges():
+                node_u = osm_graph.nodes[u]
+                node_v = osm_graph.nodes[v]
 
                 x1 = node_u.get("x")
                 y1 = node_u.get("y")
@@ -92,7 +140,7 @@ if uploaded_gpx or uploaded_graphml:
                     )
                 )
 
-        # Match resampled GPX points to graph edges
+        # Match resampled GPX points to osm_graph edges
         if uploaded_gpx and uploaded_graphml:
             route_points = resample_route(
                 route_gdf,
@@ -101,8 +149,21 @@ if uploaded_gpx or uploaded_graphml:
 
             matched_edges = match_gpx_to_edges(
                 route_points,
-                graph,
+                osm_graph,
             )
+
+            # Show only matched edges with the selected OSM tag/value
+            if selected_tag != "None" and selected_tag in matched_edges.columns:
+                matched_edges = matched_edges[
+                    matched_edges[selected_tag].notna()
+                ]
+
+                if selected_values:
+                    matched_edges = matched_edges[
+                        matched_edges[selected_tag].astype(str).isin(
+                            selected_values
+                        )
+                    ]
 
             # Convert matched edges back to longitude/latitude for plotting
             matched_edges = matched_edges.to_crs("EPSG:4326")
@@ -123,7 +184,14 @@ if uploaded_gpx or uploaded_graphml:
                         lon=matched_lons,
                         lat=matched_lats,
                         mode="lines",
-                        name="Matched edges",
+                        name=(
+                            f"Matched edges: {selected_tag}"
+                            + (
+                                f" = {', '.join(selected_values)}"
+                                if selected_values
+                                else ""
+                            )
+                        ),
                         line=dict(width=3),
                         hoverinfo="skip",
                     )

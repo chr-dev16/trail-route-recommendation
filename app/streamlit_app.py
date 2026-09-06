@@ -41,9 +41,9 @@ if uploaded_gpx or uploaded_graphml:
                 lons, lats = geometry.xy
 
                 traces.append(
-                    go.Scatter(
-                        x=np.array(lons),
-                        y=np.array(lats),
+                    go.Scattermap(
+                        lon=np.array(lons),
+                        lat=np.array(lats),
                         mode="lines",
                         name="GPX trajectory",
                         line=dict(width=4),
@@ -82,9 +82,9 @@ if uploaded_gpx or uploaded_graphml:
 
             if edge_lons:
                 traces.append(
-                    go.Scatter(
-                        x=edge_lons,
-                        y=edge_lats,
+                    go.Scattermap(
+                        lon=edge_lons,
+                        lat=edge_lats,
                         mode="lines",
                         name="GraphML",
                         line=dict(width=1),
@@ -119,9 +119,9 @@ if uploaded_gpx or uploaded_graphml:
 
             if matched_lons:
                 traces.append(
-                    go.Scatter(
-                        x=matched_lons,
-                        y=matched_lats,
+                    go.Scattermap(
+                        lon=matched_lons,
+                        lat=matched_lats,
                         mode="lines",
                         name="Matched edges",
                         line=dict(width=3),
@@ -132,23 +132,50 @@ if uploaded_gpx or uploaded_graphml:
         if traces:
             fig = go.Figure(traces)
 
+            # Centre the map on the uploaded GPX route
+            bounds = route_gdf.total_bounds
+
+            center_lon = (bounds[0] + bounds[2]) / 2
+            center_lat = (bounds[1] + bounds[3]) / 2
+
+            # Determine max. dimension of the route's bounding box
+            max_range = max(
+                bounds[2] - bounds[0],
+                bounds[3] - bounds[1],
+            )
+
+            # Adaptive zoom
+            if max_range < 0.01:
+                zoom = 16
+            elif max_range < 0.03:
+                zoom = 14
+            elif max_range < 0.1:
+                zoom = 12
+            else:
+                zoom = 10
+
+            # Apply centering and add satellite raster image underneath the GPX, OSM, ... layers
             fig.update_layout(
                 height=650,
                 margin=dict(l=10, r=10, t=10, b=10),
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
                 showlegend=True,
-                xaxis=dict(
-                    title="Longitude",
-                    showgrid=False,
-                    zeroline=False,
-                ),
-                yaxis=dict(
-                    title="Latitude",
-                    showgrid=False,
-                    zeroline=False,
-                    scaleanchor="x",
-                    scaleratio=1,
+                map=dict(
+                    style="white-bg",
+                    center=dict(
+                        lon=center_lon,
+                        lat=center_lat,
+                    ),
+                    zoom=zoom,
+                    layers=[
+                        dict(
+                            below="traces",
+                            sourcetype="raster",
+                            source=[
+                                "https://server.arcgisonline.com/ArcGIS/rest/services/"
+                                "World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                            ],
+                        )
+                    ],
                 ),
             )
 

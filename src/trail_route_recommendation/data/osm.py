@@ -1,5 +1,34 @@
 import geopandas as gpd
 import osmnx as ox
+import ast
+
+SAC_SCALE_CODES = {
+    "hiking": "T1",
+    "mountain_hiking": "T2",
+    "demanding_mountain_hiking": "T3",
+    "alpine_hiking": "T4",
+    "demanding_alpine_hiking": "T5",
+    "difficult_alpine_hiking": "T6",
+}
+
+
+def format_sac_scale(value: str) -> str:
+    # Account for multiple comma-separated tag value on OSM edges
+    try:
+        values = ast.literal_eval(value) if value.startswith("[") else [value]
+    except (ValueError, SyntaxError):
+        values = [value]
+
+    display_values = []
+
+    for item in values:
+        display_values.append(f"{item} ({SAC_SCALE_CODES.get(item, item)})")
+
+    if len(display_values) > 1:
+        return f"[{', '.join(display_values)}]"
+    else:
+        return display_values[0]
+
 
 def match_gpx_to_edges(
     gpx: gpd.GeoDataFrame,
@@ -18,6 +47,8 @@ def match_gpx_to_edges(
     y = gpx_projected.geometry.y.to_numpy()
 
     # Find nearest OSM graph edge for each GPX point
+    # take note that matched_edge_ids is a NDArray (because in osmnx edges are identified via (u, v, key))
+    # --> Needs to be converted to a Python tuple later to be hashable for addition into a set
     matched_edge_ids = ox.distance.nearest_edges(
         graph_projected,
         X=x,

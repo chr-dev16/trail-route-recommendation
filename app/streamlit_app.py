@@ -1,11 +1,31 @@
 import streamlit as st
 from trail_route_recommendation.data.gpx import load_gpx, resample_route
-from trail_route_recommendation.data.osm import match_gpx_to_edges
+from trail_route_recommendation.data.osm import match_gpx_to_edges, format_sac_scale
 import plotly.graph_objects as go
 import os
 import tempfile
 import osmnx as ox
 import numpy as np
+
+OSM_TAG_COLORS = [
+    "#FF6B6B",
+    "#4D96FF",
+    "#6BCB77",
+    "#FFD93D",
+    "#B983FF",
+    "#FF922B",
+    "#20C997",
+    "#F06595",
+]
+
+SAC_SCALE_COLORS = {
+    "hiking": "#2ECC71",                        # T1
+    "mountain_hiking": "#A8D03B",               # T2
+    "demanding_mountain_hiking": "#F1C40F",     # T3
+    "alpine_hiking": "#F39C12",                 # T4
+    "demanding_alpine_hiking": "#E67E22",       # T5
+    "difficult_alpine_hiking": "#E74C3C",       # T6
+}
 
 st.title("Trail Route Generation (dev)")
 
@@ -107,10 +127,26 @@ if uploaded_gpx or uploaded_graphml:
                     }
                 )
 
-                selected_values = st.sidebar.multiselect(
+                tag_value_options = {}
+
+                if selected_tag == "sac_scale":
+                    for value in tag_values:
+                        displayed_value = format_sac_scale(value)
+
+                        tag_value_options[displayed_value] = value
+                else:
+                    for value in tag_values:
+                        tag_value_options[value] = value
+
+                selected_labels = st.sidebar.multiselect(
                     "OSM tag value",
-                    tag_values,
+                    tag_value_options.keys(),
                 )
+
+                selected_values = [
+                    tag_value_options[label]
+                    for label in selected_labels
+                ]
 
             edge_lons = []
             edge_lats = []
@@ -178,20 +214,52 @@ if uploaded_gpx or uploaded_graphml:
                         matched_lons.extend([*lons, None])
                         matched_lats.extend([*lats, None])
 
-            if matched_lons:
+            if selected_values and selected_tag != "None":
+                for i, value in enumerate(selected_values):
+                    value_edges = matched_edges[
+                        matched_edges[selected_tag].astype(str) == value
+                    ]
+
+                    value_lons = []
+                    value_lats = []
+
+                    for geometry in value_edges.geometry:
+                        if geometry is not None and geometry.geom_type == "LineString":
+                            lons, lats = geometry.xy
+                            value_lons.extend([*lons, None])
+                            value_lats.extend([*lats, None])
+
+                    if value_lons:
+                        if selected_tag == "sac_scale":
+                            display_value = format_sac_scale(value)
+                        else:
+                            display_value = value
+
+                        traces.append(
+                            go.Scattermap(
+                                lon=value_lons,
+                                lat=value_lats,
+                                mode="lines",
+                                name=f"{selected_tag} = {display_value}",
+                                line=dict(
+                                    width=3,
+                                    color=(
+                                        SAC_SCALE_COLORS.get(value)
+                                        if selected_tag == "sac_scale"
+                                        else OSM_TAG_COLORS[i % len(OSM_TAG_COLORS)]
+                                    ),
+                                ),
+                                hoverinfo="skip",
+                            )
+                        )
+
+            elif matched_lons:
                 traces.append(
                     go.Scattermap(
                         lon=matched_lons,
                         lat=matched_lats,
                         mode="lines",
-                        name=(
-                            f"Matched edges: {selected_tag}"
-                            + (
-                                f" = {', '.join(selected_values)}"
-                                if selected_values
-                                else ""
-                            )
-                        ),
+                        name=f"Matched edges: {selected_tag}",
                         line=dict(width=3),
                         hoverinfo="skip",
                     )
@@ -227,6 +295,13 @@ if uploaded_gpx or uploaded_graphml:
                 height=650,
                 margin=dict(l=10, r=10, t=10, b=10),
                 showlegend=True,
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="left",
+                    x=0,
+                ),
                 map=dict(
                     style="white-bg",
                     center=dict(

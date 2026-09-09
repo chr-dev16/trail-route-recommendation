@@ -1,7 +1,7 @@
-from src.data.gpx import load_gpx
+from trail_route_recommendation.data.gpx import load_gpx
 import geopandas as gpd
 from pathlib import Path
-from shapely.geometry import box, mapping
+from shapely.geometry import box, mapping, LineString
 import requests
 from tqdm.auto import tqdm
 import rasterio
@@ -168,6 +168,17 @@ def extract_worldcover_route_segments(
                     "worldcover_class": int(wc_class)
                 })
 
-        wc_class_segments = gpd.GeoDataFrame(segments, geometry="geometry", crs="EPSG:32632")
+        if len(segments) == 0:
+            wc_class_segments = gpd.GeoDataFrame(
+                {"geometry": []},
+                geometry="geometry",
+                crs="EPSG:32632"
+            )
+        else:
+            wc_class_segments = gpd.GeoDataFrame(
+                segments,
+                geometry="geometry",
+                crs="EPSG:32632"
+            )
 
     return wc_class_segments

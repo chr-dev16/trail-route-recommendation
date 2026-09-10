@@ -159,45 +159,45 @@ def extract_worldcover_route_segments(
             # Create one GPX segment between two GPX points
             segment = LineString([points[i], points[i + 1]])
 
-                # Create 20 m buffer around GPX
-                buffer = segment.buffer(buffer_distance)
+            # Create 20 m buffer around GPX
+            buffer = segment.buffer(buffer_distance)
 
-                # Transform buffer to WC CRS
-                buffer_raster = (
-                    gpd.GeoSeries([buffer], crs="EPSG:32632")
-                    .to_crs(src.crs)
-                    .iloc[0]
+            # Transform buffer to WC CRS
+            buffer_raster = (
+                gpd.GeoSeries([buffer], crs="EPSG:32632")
+                .to_crs(src.crs)
+                .iloc[0]
+            )
+
+            # Crop WC raster to the buffered area
+            try:
+                data, _ = mask(
+                    src,
+                    [mapping(buffer_raster)],
+                    crop=True
                 )
+            except ValueError:
+                continue
 
-                # Crop WC raster to the buffered area
-                try:
-                    data, _ = mask(
-                        src,
-                        [mapping(buffer_raster)],
-                        crop=True
-                    )
-                except ValueError:
-                    continue
+            values = data[0]
 
-                values = data[0]
+            # If there is missing WC raster data for any pixel, ignore it
+            if src.nodata is not None:
+                values = values[values != src.nodata]
 
-                # If there is missing WC raster data for any pixel, ignore it
-                if src.nodata is not None:
-                    values = values[values != src.nodata]
+            # If segment has no associated WC classes, move to next segment
+            if len(values) == 0:
+                continue
 
-                # If segment has no associated WC classes, move to next segment
-                if len(values) == 0:
-                    continue
+            # Determine most common WC class
+            counts = Counter(values) # Tally frequency of all WC classes
+            wc_class = counts.most_common(1)[0][0] # Extract most common WC class ID
 
-                # Determine most common WC class
-                counts = Counter(values) # Tally frequency of all WC classes
-                wc_class = counts.most_common(1)[0][0] # Extract most common WC class ID
-
-                # Collect the WC class per segment
-                segments.append({
-                    "geometry": segment,
-                    "worldcover_class": int(wc_class)
-                })
+            # Collect the WC class per segment
+            segments.append({
+                "geometry": segment,
+                "worldcover_class": int(wc_class)
+            })
 
         if len(segments) == 0:
             wc_class_segments = gpd.GeoDataFrame(

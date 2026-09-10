@@ -148,14 +148,16 @@ def extract_worldcover_route_segments(
                 crs="EPSG:32632"
             )
 
-        for line in route_projected.geometry:
+        # Create segments between consecutive resampled GPX points
+        points = []
 
-            points = list(line.coords)
+        for point in route_projected.geometry:
+            points.append((point.x, point.y))
 
-            for i in range(len(points) - 1):
+        for i in range(len(points) - 1):
 
-                # Create one GPX segment between two GPX points
-                segment = LineString([points[i], points[i + 1]])
+            # Create one GPX segment between two GPX points
+            segment = LineString([points[i], points[i + 1]])
 
                 # Create 20 m buffer around GPX
                 buffer = segment.buffer(buffer_distance)

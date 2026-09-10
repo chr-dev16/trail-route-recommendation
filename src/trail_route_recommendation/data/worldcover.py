@@ -119,6 +119,35 @@ def extract_worldcover_route_segments(
 
         route_projected = route_gdf.to_crs("EPSG:32632")
 
+        # Check whether the WC tile overlaps the GPX bounding box
+        bounds = route_projected.total_bounds
+
+        # Consider buffer
+        route_bbox = box(
+            bounds[0],
+            bounds[1],
+            bounds[2],
+            bounds[3]
+        ).buffer(buffer_distance)
+
+        # Project GPX bounding box to WC CRS
+        route_bbox_raster = (
+            gpd.GeoSeries([route_bbox], crs="EPSG:32632")
+            .to_crs(src.crs)
+            .iloc[0]
+        )
+
+        # Determine WC tile bounding box
+        raster_bbox = box(*src.bounds)
+
+        # Return empty GeoDataFrame if GPX is not in current WC tile
+        if not route_bbox_raster.intersects(raster_bbox):
+            return gpd.GeoDataFrame(
+                {"geometry": [], "worldcover_class": []},
+                geometry="geometry",
+                crs="EPSG:32632"
+            )
+
         for line in route_projected.geometry:
 
             points = list(line.coords)

@@ -1,4 +1,4 @@
-from src.data.gpx import load_gpx, resample_route
+from trail_route_recommendation.data.gpx import load_gpx, resample_route
 import geopandas as gpd
 from pathlib import Path
 import rasterio

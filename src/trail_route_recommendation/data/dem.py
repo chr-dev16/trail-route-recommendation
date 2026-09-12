@@ -76,7 +76,8 @@ def compute_climb_features(
     elevations: np.ndarray,
     spacing_metres: float = 30,
     slope_window: int = 5,
-    min_climb_length: float = 300) -> dict[str, float]:
+    min_climb_length: float = 300,
+    return_climbs: bool = False) -> dict[str, float]:
 
     # Calculate local slope over the 150-m window
     delta = elevations[slope_window:] - elevations[:-slope_window]
@@ -103,6 +104,7 @@ def compute_climb_features(
 
             length = (end - start) * spacing_metres
 
+            # Colect a list of climbs that are longer than min_climb_length threshold
             if length >= min_climb_length:
                 elevation_gain = (
                     elevations[end - 1 + slope_window]
@@ -110,6 +112,8 @@ def compute_climb_features(
                 )
 
                 climbs.append({
+                    "start": start,
+                    "end": end + slope_window,
                     "length": length,
                     "elevation_gain": elevation_gain
                 })
@@ -129,6 +133,8 @@ def compute_climb_features(
             )
 
             climbs.append({
+                "start": start,
+                "end": end + slope_window,
                 "length": length,
                 "elevation_gain": elevation_gain
             })
@@ -137,7 +143,7 @@ def compute_climb_features(
         lengths = np.array([climb["length"] for climb in climbs])
         gains = np.array([climb["elevation_gain"] for climb in climbs])
 
-        return {
+        climb_features = {
             "number_of_climbs": len(climbs),
             "total_climb_distance": lengths.sum(),
             "mean_climb_length": lengths.mean(),
@@ -145,8 +151,13 @@ def compute_climb_features(
             "mean_climb_elevation_gain": gains.mean(),
             "max_climb_elevation_gain": gains.max(),
         }
-    else:
-        return {
+
+        if return_climbs:
+            climb_features["climbs"] = climbs
+
+        return climb_features
+    else: # No climbs were found
+        climb_features = {
             "number_of_climbs": 0,
             "total_climb_distance": 0,
             "mean_climb_length": 0,
@@ -154,6 +165,11 @@ def compute_climb_features(
             "mean_climb_elevation_gain": 0,
             "max_climb_elevation_gain": 0,
         }
+
+        if return_climbs:
+            climb_features["climbs"] = []
+
+        return climb_features
 
 def compute_ssdon_features(
     ssdon_values: np.ndarray

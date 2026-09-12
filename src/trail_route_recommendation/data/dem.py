@@ -77,6 +77,7 @@ def compute_climb_features(
     spacing_metres: float = 30,
     slope_window: int = 5,
     min_climb_length: float = 300,
+    min_elevation_drop: float = 30,
     return_climbs: bool = False) -> dict[str, float]:
 
     # Calculate local slope over the 150-m window
@@ -138,6 +139,37 @@ def compute_climb_features(
                 "length": length,
                 "elevation_gain": elevation_gain
             })
+
+    # Merge consecutive climbs if there is < min_elevation_drop elevation loss between them
+    if climbs:
+        merged_climbs = [climbs[0]]
+
+        # Iterate through all climbs, starting with the second climb
+        for climb in climbs[1:]:
+            previous_climb = merged_climbs[-1]
+
+            previous_end = previous_climb["end"] - slope_window
+            current_start = climb["start"]
+
+            elevation_drop = (
+                elevations[previous_end]
+                - np.min(elevations[previous_end:current_start + 1]) # minimum of all GPX points in between end of previous climb and start of current climb
+            )
+
+            if elevation_drop < min_elevation_drop:
+                previous_climb["end"] = climb["end"] # previous_climb and climb are the same thing in this case
+                previous_climb["length"] = (
+                    (climb["end"] - slope_window - previous_climb["start"])
+                    * spacing_metres
+                )
+                previous_climb["elevation_gain"] = (
+                    elevations[climb["end"] - 1]
+                    - elevations[previous_climb["start"]]
+                )
+            else:
+                merged_climbs.append(climb)
+
+        climbs = merged_climbs
 
     if climbs:
         lengths = np.array([climb["length"] for climb in climbs])

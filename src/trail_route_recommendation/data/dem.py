@@ -48,16 +48,31 @@ def compute_slope_features(elevations: np.ndarray,
 
     slope_percent = (delta / (spacing_metres * slope_window)) * 100
 
+    if len(slope_percent) == 0:
+        raise ValueError("Not enough elevation points for the selected slope window.")
+
     distance_km = np.arange(slope_window, len(elevations)) * spacing_metres / 1000
 
     uphill_slope = slope_percent[slope_percent > 0]
     downhill_slope = slope_percent[slope_percent < 0]
 
+    # A route may have no uphill or no downhill sections.
+    mean_uphill = 0.0
+    mean_downhill = 0.0
+    p95_uphill = 0.0
+    p95_downhill = 0.0
+    if len(uphill_slope) > 0:
+        mean_uphill = uphill_slope.mean()
+        p95_uphill = np.percentile(uphill_slope, 95)
+    if len(downhill_slope) > 0:
+        mean_downhill = -downhill_slope.mean()
+        p95_downhill = -np.percentile(downhill_slope, 5)
+
     slope_features = {
-        "mean_uphill_slope": uphill_slope.mean(),
-        "mean_downhill_slope": -downhill_slope.mean(),
-        "p95_uphill_slope": np.percentile(uphill_slope, 95),
-        "p95_downhill_slope": -np.percentile(downhill_slope, 5),
+        "mean_uphill_slope": mean_uphill,
+        "mean_downhill_slope": mean_downhill,
+        "p95_uphill_slope": p95_uphill,
+        "p95_downhill_slope": p95_downhill,
 
         "fraction_uphill": np.mean(slope_percent > 0),
         "fraction_uphill_above_10percent": np.mean(slope_percent > 10),
@@ -232,7 +247,8 @@ def extract_dem_features(gpx_file_path: Path,
                          negative_openness_path: Path = Path("../data/raw/gedtm30/negative_openness_gedtm30_alps.tif"),
                          ) -> dict[str, int]:
 
-    route_gdf = load_gpx(gpx_file_path)
+    with open(gpx_file_path, "r", encoding="utf-8") as file:
+        route_gdf = load_gpx(file)
 
     # Resample GPX route to regularly spaced points
     resampled_gdf = resample_route(route_gdf, spacing_metres=spacing_metres)
@@ -245,7 +261,7 @@ def extract_dem_features(gpx_file_path: Path,
 
     features = compute_elevation_features(elevations, threshold_grid)
     features.update(compute_slope_features(elevations, spacing_metres=spacing_metres))
-    features.update(compute_climb_features(elevations))
+    features.update(compute_climb_features(elevations, spacing_metres=spacing_metres))
     features.update(compute_ssdon_features(ssdon_values))
     features.update(compute_openness_features(pos_openness_values, "positive"))
     features.update(compute_openness_features(neg_openness_values, "negative"))

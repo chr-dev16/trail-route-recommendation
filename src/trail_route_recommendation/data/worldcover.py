@@ -14,7 +14,8 @@ def extract_worldcover_features(
     buffer_metres: int = 20,
     worldcover_year: int = 2021) -> dict[str,float|str]:
 
-    route_gdf = load_gpx(gpx_file_path)
+    with open(gpx_file_path, "r", encoding="utf-8") as file:
+        route_gdf = load_gpx(file)
 
     # Extract GPX file bounding box
     geom = box(

@@ -26,10 +26,10 @@ def compute_elevation_features(elevations: np.ndarray,
     delta = np.diff(elevations)
 
     elevation_features = {
-        "min_elevation": np.min(elevations),
-        "max_elevation": np.max(elevations),
-        "mean_elevation": np.mean(elevations),
-        "std_elevation": np.std(elevations),
+        # "min_elevation": np.min(elevations),
+        # "max_elevation": np.max(elevations),
+        # "mean_elevation": np.mean(elevations),
+        # "std_elevation": np.std(elevations),
         "elevation_range": np.max(elevations) - np.min(elevations),
     }
 
@@ -79,7 +79,7 @@ def compute_slope_features(elevations: np.ndarray,
         "fraction_uphill_above_20percent": np.mean(slope_percent > 20),
         "fraction_uphill_above_30percent": np.mean(slope_percent > 30),
 
-        "fraction_downhill": np.mean(slope_percent < 0),
+        # "fraction_downhill": np.mean(slope_percent < 0),
         "fraction_downhill_above_10percent": np.mean(slope_percent < -10),
         "fraction_downhill_above_20percent": np.mean(slope_percent < -20),
         "fraction_downhill_above_30percent": np.mean(slope_percent < -30),
@@ -192,10 +192,10 @@ def compute_climb_features(
 
         climb_features = {
             "number_of_climbs": len(climbs),
-            "total_climb_distance": lengths.sum(),
+            # "total_climb_distance": lengths.sum(),
             "mean_climb_length": lengths.mean(),
             "max_climb_length": lengths.max(),
-            "mean_climb_elevation_gain": gains.mean(),
+            # "mean_climb_elevation_gain": gains.mean(),
             "max_climb_elevation_gain": gains.max(),
         }
 
@@ -206,10 +206,10 @@ def compute_climb_features(
     else: # No climbs were found
         climb_features = {
             "number_of_climbs": 0,
-            "total_climb_distance": 0,
+            # "total_climb_distance": 0,
             "mean_climb_length": 0,
             "max_climb_length": 0,
-            "mean_climb_elevation_gain": 0,
+            # "mean_climb_elevation_gain": 0,
             "max_climb_elevation_gain": 0,
         }
 
@@ -232,10 +232,16 @@ def compute_openness_features(
     reference: str,
 ) -> dict[str, float]:
 
-    return {
+    openness_features = {
         f"mean_{reference}_openness": np.mean(openness_values),
         f"p95_{reference}_openness": np.percentile(openness_values, 95),
     }
+
+    if reference == "negative":
+        # "mean_negative_openness": removed due to feature redundancy
+        del openness_features["mean_negative_openness"]
+
+    return openness_features
     
 
 def extract_dem_features(gpx_file_path: Path,

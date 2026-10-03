@@ -100,7 +100,12 @@ def show_route(route_source, column, route_number):
                     # Different trace names prevent duplicate charts for identical routes.
                     for trace in traces:
                         trace.name = "Route 2: " + trace.name
-                with column:
+                with column: # Indented code is only executed for the respective Streamlit container
+                    # Calculate the GPX length in metres before converting to kilometres.
+                    metric_crs = route_gdf.estimate_utm_crs()
+                    metric_route = route_gdf.to_crs(metric_crs)
+                    distance_km = metric_route.length.sum() / 1000
+                    st.metric("Distance", str(round(distance_km, 2)) + " km")
                     render_map(traces, route_gdf)
             else:
                 st.warning("No plottable data found.") # Only display warning that there is no data for plotting. User is able to upload a different GPX file / OSM file.

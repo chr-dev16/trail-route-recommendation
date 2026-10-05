@@ -1,5 +1,92 @@
 import random
+import ast
+import math
 import osmnx as ox
+
+# Define how OSM tags are aggregated into route features
+OSM_FEATURES = {
+    "osm_trail_share": ("highway", ["path", "footway", "track", "steps"]),
+    "osm_paved_share": (
+        "surface",
+        [
+            "paved",
+            "asphalt",
+            "concrete",
+            "concrete:plates",
+            "concrete:lanes",
+            "paving_stones",
+            "sett",
+            "cobblestone",
+        ],
+    ),
+    "osm_sac_t3plus_share": (
+        "sac_scale",
+        [
+            "demanding_mountain_hiking",
+            "alpine_hiking",
+            "demanding_alpine_hiking",
+            "difficult_alpine_hiking",
+        ],
+    ),
+    "osm_track_grade3plus_share": (
+        "tracktype",
+        ["grade3", "grade4", "grade5"],
+    ),
+}
+
+
+def osm_features(edge_data, lengths):
+    """Calculate length-weighted OSM tag shares, keeping missing tags explicit."""
+    # Use total route length as basis for all OSM feature shares
+    total = sum(lengths)
+
+    if total <= 0:
+        raise ValueError("OSM features require a positive route length.")
+
+    features = {}
+
+    # Calculate each configured OSM feature separately
+    for name, (tag, accepted) in OSM_FEATURES.items():
+        matched = 0.0
+        missing = 0.0
+
+        for edge, length in zip(edge_data, lengths):
+            value = edge.get(tag)
+
+            # Convert OSM values stored as string representations of lists back to Python lists for later processing
+            if isinstance(value, str) and value.startswith("["):
+                try:
+                    value = ast.literal_eval(value)
+                except (ValueError, SyntaxError):
+                    value = None
+
+            # Treat a single OSM tag value the same way as a list with one value. This is relevant because we want that value is a list in any case
+            if not isinstance(value, (list, tuple)):
+                value = [value]
+
+            values = []
+
+            for item in value:
+                if item is not None and str(item) not in ("", "nan", "None"): # Hedge against any strange tag values that express a missing value
+                    values.append(str(item))
+
+            if not values:
+                missing += length # Add edge length to the missing distance collector
+                continue
+
+            count = 0
+
+            for item in values:
+                if item in accepted:
+                    count += 1
+
+            # Split section length betweenn multiple tag values on the same OSM edge. Relevant is not all tag values are accepted, for example if an edge has values path and service for "highway" (only path is in OSM_FEATURES)
+            matched += length * count / len(values)
+
+        features[name] = matched / total
+        features["osm_" + tag + "_missing_share"] = missing / total
+
+    return features
 
 
 def route_features(graph, route):
@@ -18,17 +105,141 @@ def route_features(graph, route):
     return features
 
 
-def similarity_error(features, reference):
-    """Calculate the deviation from the reference. A smaller value is better."""
-    route_distance = features["distance_m"]
-    reference_distance = reference["distance_m"]
+# Distribute feature group weights across the active features in each group
+def get_grouped_weights(reference, weights, group_weights):
+    # WorldCover features belong to one common feature group
+    worldcover_names = [
+        "tree_cover",
+        "shrubland",
+        "grassland",
+        "cropland",
+        "built_up",
+        "bare_sparse_vegetation",
+        "snow_ice",
+        "permanent_water",
+        "herbaceous_wetland",
+        "mangroves",
+        "moss_lichen",
+    ]
 
-    difference = abs(route_distance - reference_distance)
-    relative_error = difference / reference_distance
+    # Keep track of total individual feature weight within each feature group
+    group_totals = {
+        "distance": 0.0,
+        "dem": 0.0,
+        "worldcover": 0.0,
+        "osm": 0.0,
+    }
 
-    # For now, we only compare distance. 0.10 means a 10% deviation.
-    # Add the weighted comparison of all agreed features here later.
-    return relative_error
+    # Check that all provided feature group weights are valid
+    for group in group_weights:
+        if group not in group_totals:
+            raise ValueError("Unknown feature group: " + group)
+
+        group_weight = float(group_weights[group])
+
+        if not math.isfinite(group_weight) or group_weight < 0:
+            raise ValueError("Invalid group weight: " + group)
+
+    if weights is None:
+        weights = {}
+
+        for name in reference:
+            weights[name] = 1.0 # Use equal individual feature weights if no specific weights were provided
+
+    feature_groups = {}
+
+    for name in weights:
+        weight = float(weights[name])
+
+        if not math.isfinite(weight) or weight < 0:
+            raise ValueError("Invalid weight for feature: " + name)
+
+        if name == "distance_m":
+            group = "distance"
+        elif name.startswith("osm_"):
+            group = "osm"
+        elif name in worldcover_names:
+            group = "worldcover"
+        else:
+            group = "dem"
+
+        feature_groups[name] = group
+        group_totals[group] += weight
+
+    # Calculate final feature weights while preserving the requested group weights
+    grouped_weights = {}
+
+    # Assign every feature to its corresponding feature group
+    for name in weights:
+        group = feature_groups[name]
+        grouped_weights[name] = 0.0
+
+        if group_totals[group] > 0:
+            group_weight = float(group_weights.get(group, 1.0))
+            grouped_weights[name] = (
+                group_weight * float(weights[name]) / group_totals[group]
+            )
+
+    return grouped_weights
+
+
+# Compare candidate and reference route features and return one overall error value
+def similarity_error(features, reference, weights=None, scales=None, group_weights=None):
+    """Return the weighted mean of scaled feature differences; smaller is better."""
+    # Convert feature group weights into weights for the individual features
+    if group_weights is not None:
+        weights = get_grouped_weights(reference, weights, group_weights)
+
+    # Use equal individual feature weights if no specific weights were provided
+    if weights is None:
+        weights = {}
+
+        for name in reference:
+            weights[name] = 1.0
+
+    if scales is None:
+        scales = {}
+
+    # Accumulate scaled feature differences according to their weights
+    weighted_error = 0.0
+    total_weight = 0.0
+
+    # Assign every feature to its feature group
+    for name in weights:
+        weight = float(weights[name])
+
+        if not math.isfinite(weight) or weight < 0:
+            raise ValueError("Invalid weight for feature: " + name)
+
+        if weight == 0:
+            continue
+
+        if name not in features or name not in reference: # Hedge for edge case
+            raise ValueError("Missing candidate or reference feature: " + name)
+
+        value = float(features[name])
+        target = float(reference[name])
+
+        if not math.isfinite(value) or not math.isfinite(target):
+            raise ValueError("Invalid candidate or reference feature: " + name)
+
+        scale = float(scales.get(name, max(abs(target), 1.0))) # Take provided scale if possible. Otherwise, take scale of reference but min. 1.0
+
+        if scale == 0:
+            continue  # Skip feature because otherwise we would divide by 0 later
+
+        if not math.isfinite(scale) or scale < 0: # Hedge for edge case
+            raise ValueError("Invalid scale for feature: " + name)
+
+        # Calculate scaled absolute difference between candidate and reference feature
+        difference = abs(value - target) / scale
+        weighted_error += weight * difference
+        total_weight += weight
+
+    if total_weight == 0:
+        raise ValueError("At least one feature must have a positive weight greater than 0.")
+
+    return weighted_error / total_weight # Essentially a weighted mean is calculated
 
 
 def get_error(candidate):

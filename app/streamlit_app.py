@@ -1,11 +1,157 @@
 import streamlit as st
 from pathlib import Path
+import json
+import pandas as pd
 import plotly.graph_objects as go
 import osmnx as ox
+from trail_route_recommendation.data.gpx import resample_route
 from trail_route_recommendation.data.osm_pruning_debugging import format_sac_scale
+from trail_route_recommendation.data.worldcover import extract_worldcover_features
+from trail_route_recommendation.data.dtm import extract_dtm_features
+from trail_route_recommendation.routing.route_generator import similarity_error, osm_features
 from ui.settings import OSM_TAGS
 from ui.data_loading import load_uploaded_route, load_uploaded_graph, get_matched_edges
 from ui.route_display import add_gpx, add_graph, add_matched_edges, render_map
+
+# Hyperparameter setting. 7.5 m showed smallest error to official race ascent/descent values
+FEATURE_OPTIONS = {
+    "dtm": {"threshold_grid": [7.5], "spacing_metres": 30},
+    "worldcover": {"buffer_metres": 20, "worldcover_year": 2021},
+}
+FEATURE_SCALES_PATH = Path("./data/processed/feature_scales.json")
+
+
+def load_feature_scales(): # Needed for feature normalisation
+    if not FEATURE_SCALES_PATH.exists():
+        raise FileNotFoundError("Feature scales not found. Run build_feature_scales.py first.")
+    data = json.loads(FEATURE_SCALES_PATH.read_text(encoding="utf-8"))
+    return data["scales"]
+
+
+def get_osm_features(route, points, graph):
+    metric_crs = route.estimate_utm_crs()
+
+     # Download OSM graph around route if no graph was provided
+    if graph is None:
+        for tag in ["highway", "surface", "sac_scale", "tracktype"]:
+            if tag not in ox.settings.useful_tags_way:
+                ox.settings.useful_tags_way.append(tag)
+
+        # Create 500 m buffer around route in metric CRS and convert back to latitude/longitude for OSM graph download
+        polygon = route.to_crs(metric_crs).geometry.buffer(500).to_crs("EPSG:4326").iloc[0]
+        graph = ox.graph_from_polygon(polygon, network_type="all", simplify=True, retain_all=True)
+
+    # Make sure that OSM graph and GPX points are both in metric CRS such that 100 m matching threshold can work later
+    graph = ox.project_graph(graph, to_crs=metric_crs)
+    points = points.to_crs(metric_crs)
+    xs = []
+    ys = []
+    lengths = []
+
+    # use midpoint and length of each pair of consecutive GPX points for matching to OSM edges
+    for index in range(len(points) - 1):
+        first = points.geometry.iloc[index]
+        next = points.geometry.iloc[index + 1]
+        xs.append((first.x + next.x) / 2) # calculate midpoint
+        ys.append((first.y + next.y) / 2) # calculate midpoint
+        lengths.append(first.distance(next))
+
+    edge_ids, distances = ox.distance.nearest_edges(graph, X=xs, Y=ys, return_dist=True) # Get OSM edges that are the closest to GPX points
+    edge_data = []
+    for edge_id, distance in zip(edge_ids, distances):
+        if distance <= 100: # matching threshold of 100 m
+            edge_data.append(graph.edges[edge_id])
+        else:
+            edge_data.append({})
+    return osm_features(edge_data, lengths)
+
+# Cache extracted features to avoid repeating the expensive feature extraction when inputs have not changed. Limit to 10 entries to avoid that cache grows endlessly when app is deployed and many different routes are uploaded
+@st.cache_data(max_entries=10)
+def extract_comparison_features(gpx_bytes, graphml_bytes, gpx_name, route_number):
+    # Store uploaded GPX temporarily because DTM and WorldCover feature extraction expect a file path
+    cache_folder = Path("./data/uploads")
+    cache_folder.mkdir(parents=True, exist_ok=True)
+    gpx_path = cache_folder / ("comparison_route_" + str(route_number) + "_" + Path(gpx_name).name)
+
+    # Only write GPX file if it does not exist yet or uploaded data has changed
+    if not gpx_path.exists() or gpx_path.read_bytes() != gpx_bytes:
+        gpx_path.write_bytes(gpx_bytes)
+
+    # 1. Collect DTM features
+    route = load_uploaded_route(gpx_bytes)
+    points = resample_route(route, spacing_metres=30) # resampling with 30 m intervals
+    features = extract_dtm_features(gpx_path, **FEATURE_OPTIONS["dtm"])
+
+    # 2. Collect WorldCover features
+    worldcover = extract_worldcover_features(gpx_path, **FEATURE_OPTIONS["worldcover"])
+    class_names = [
+        "tree_cover", "shrubland", "grassland", "cropland", "built_up",
+        "bare_sparse_vegetation", "snow_ice", "permanent_water",
+        "herbaceous_wetland", "mangroves", "moss_lichen",
+    ]
+    for name in class_names:
+        features[name] = worldcover.get(name, 0.0)
+
+    # 3. Collect distance feature
+    metric_route = route.to_crs(route.estimate_utm_crs())
+    features["distance_m"] = float(metric_route.length.sum()) # Add length of calculated route
+
+    # 4. Collect OSM features
+    graph = None
+    if graphml_bytes is not None:
+        graph = load_uploaded_graph(graphml_bytes) # Conversion of bytes object to MultziDiGraph
+    features.update(get_osm_features(route, points, graph))
+
+    return features
+
+
+def get_group_error(candidate, reference, scales, group):
+    group_weights = {"distance": 0.0, "dtm": 0.0, "worldcover": 0.0, "osm": 0.0}
+    group_weights[group] = 1.0 # Only activate the group that was passed to the function
+    return similarity_error(candidate, reference, scales=scales, group_weights=group_weights)
+
+
+def show_feature_comparison(route_1, route_2):
+    """Display similarity scoring in Streamlit app"""
+    with st.spinner("Calculating route features..."):
+        # get all individual features
+        reference = extract_comparison_features(
+            route_1["gpx_bytes"], route_1["graphml_bytes"], route_1["gpx_name"], 1,
+        )
+        candidate = extract_comparison_features(
+            route_2["gpx_bytes"], route_2["graphml_bytes"], route_2["gpx_name"], 2,
+        )
+
+    scales = load_feature_scales()
+    overall_error = similarity_error(
+        candidate,
+        reference,
+        scales=scales, # Normalisation is happening here
+        group_weights={"distance": 0.0, "dtm": 1.0, "worldcover": 1.0, "osm": 1.0}, # Overall similarity error is calculated by equal feature group weighting
+    )
+
+    # get group errors for displaying
+    dtm_error = get_group_error(candidate, reference, scales, "dtm")
+    worldcover_error = get_group_error(candidate, reference, scales, "worldcover")
+    osm_error = get_group_error(candidate, reference, scales, "osm")
+
+    st.subheader("Feature comparison")
+    st.metric("Overall feature error (lower is better)", round(overall_error, 4))
+    st.caption(
+        "Feature error by group: DTM: " + str(round(dtm_error, 4))
+        + " | WorldCover: " + str(round(worldcover_error, 4))
+        + " | OSM: " + str(round(osm_error, 4))
+    )
+    st.caption("Complete routes; DTM, WorldCover and OSM weighted equally. Distance is shown but not scored.")
+
+    rows = []
+    for feature, value in reference.items():
+        rows.append({
+            "Feature": feature,
+            "Route 1 (reference)": value,
+            "Route 2": candidate.get(feature),
+        })
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch") # Comparison table
 
 
 def show_route(route_source, column, route_number):
@@ -29,8 +175,8 @@ def show_route(route_source, column, route_number):
 
     try:
         if route_source == "Upload files":
-            uploaded_gpx = st.sidebar.file_uploader(labels["gpx"], type=["gpx"]) # Show Streamlit file upload element if "Upload files" is selected
-            uploaded_graphml = st.sidebar.file_uploader(labels["graphml"], type=["graphml"])
+            uploaded_gpx = st.sidebar.file_uploader(labels["gpx"], type=["gpx"], key="gpx_" + str(route_number)) # Show Streamlit file upload element if "Upload files" is selected
+            uploaded_graphml = st.sidebar.file_uploader(labels["graphml"], type=["graphml"], key="graphml_" + str(route_number))
             if uploaded_gpx is not None:
                 gpx_bytes = uploaded_gpx.getvalue() # Read the uploaded GPX file contents as bytes to enable later processing in load_uploaded_file()
                 gpx_name = uploaded_gpx.name
@@ -40,11 +186,13 @@ def show_route(route_source, column, route_number):
         else:
             # Use the existing race folders in the project if user chooses this option
             races_folder = Path("data/races")
+            if not races_folder.exists():
+                races_folder = Path(__file__).resolve().parents[1] / "data" / "races"  # If data/races does not exist relative to the working directory, search the folder relative to this Streamlit file
             gpx_files = sorted(races_folder.glob("*/*.gpx"))
             if not gpx_files:
                 st.info("No GPX files found in data/races. Start the app from the project folder.")
             else:
-                selected_gpx = st.sidebar.selectbox(labels["race"], gpx_files) # Alphabetically sorted dropdown of stored races
+                selected_gpx = st.sidebar.selectbox(labels["race"], gpx_files, key="race_" + str(route_number)) # Alphabetically sorted dropdown of stored races
                 gpx_bytes = selected_gpx.read_bytes()
                 gpx_name = selected_gpx.name
                 graphml_path = selected_gpx.with_name(selected_gpx.stem + "_retain_all.graphml") # Stored GraphML files all have _retain_all extension to make download parameters clear
@@ -65,7 +213,7 @@ def show_route(route_source, column, route_number):
             if graphml_bytes is not None: # Starts once a GraphML file is available
                 osm_graph = load_uploaded_graph(graphml_bytes)
                 st.success(labels["graphml_message"] + graphml_name)
-                selected_tag = st.sidebar.selectbox(labels["tag"], ["None"] + OSM_TAGS)
+                selected_tag = st.sidebar.selectbox(labels["tag"], ["None"] + OSM_TAGS, key="tag_" + str(route_number))
                 selected_values = []
 
                 if selected_tag != "None":
@@ -83,11 +231,13 @@ def show_route(route_source, column, route_number):
                                 labels["values"],
                                 tag_values,
                                 format_func=format_sac_scale, # Apply special formatting to SAC scale to account for ordinal characteristics of the feature
+                                key="values_" + str(route_number), # Make selection specific to reference route
                             )
                         else:
                             selected_values = st.sidebar.multiselect(
                                 labels["values"],
                                 tag_values,
+                                key="values_" + str(route_number), # Make selection specific to generated route
                             )
 
                 add_graph(traces, osm_graph)
@@ -109,25 +259,39 @@ def show_route(route_source, column, route_number):
                     render_map(traces, route_gdf)
             else:
                 st.warning("No plottable data found.") # Only display warning that there is no data for plotting. User is able to upload a different GPX file / OSM file.
+
+            return {
+                "gpx_bytes": gpx_bytes,
+                "graphml_bytes": graphml_bytes,
+                "gpx_name": gpx_name,
+            }
     except Exception as e:
         st.error("Could not read the route data: " + str(e)) # Ensures that error message appears in the app in case of a problem
+
+    return None
 
 
 st.set_page_config(layout="wide") # Use entire screen width (relevant for wider screen such as my 21:9 monitor for video presentation)
 st.title("GPX route viewer")
 st.write("Select a saved race or upload a GPX route and an optional GraphML file.")
 st.sidebar.header("Route")
-route_source = st.sidebar.radio("Route source", ["Upload files", "Saved race"]) # Single option selection with "radio" buttons
+route_source = st.sidebar.radio("Route source", ["Upload files", "Saved race"], key="route_1_source") # Single option selection with "radio" buttons
 
-compare_routes = st.sidebar.checkbox("Compare a second route")
+compare_routes = st.sidebar.checkbox("Compare a second route", key="compare_routes")
 if compare_routes:
     left, right = st.columns(2) # Switch to Streamlit colunm layout if route comparison is selected
 else:
     left = st.container()
 
-show_route(route_source, left, 1)
+route_1 = show_route(route_source, left, 1)
 
 if compare_routes:
     st.sidebar.header("Route 2")
-    route_source = st.sidebar.radio("Route 2 source", ["Upload files", "Saved race"]) # Single option selection with "radio" buttons
-    show_route(route_source, right, 2)
+    route_source = st.sidebar.radio("Route 2 source", ["Upload files", "Saved race"], key="route_2_source") # Single option selection with "radio" buttons
+    route_2 = show_route(route_source, right, 2)
+
+    if route_1 is not None and route_2 is not None:
+        try:
+            show_feature_comparison(route_1, route_2)
+        except Exception as e:
+            st.warning("Could not compare route features: " + str(e))

@@ -322,33 +322,33 @@ def generate_routes(graph, start, reference, attempts=100, top_k=3, seed=42):
 
     return best_routes
 
-if __name__ == "__main__":
-    # Example location in Innsbruck: latitude and longitude.
-    latitude = 47.2692
-    longitude = 11.4041
-    location = (latitude, longitude)
 
-    # Download a walking network from OSM. This requires an internet connection since the overpass API is queried.
-    graph = ox.graph_from_point(location, dist=4000, network_type="walk")
+def route_to_gpx(graph, route):
+    """Export a route from a longitude/latitude CRS graph, including edge geometry."""
+    import gpxpy.gpx
 
-    # Alternatively, replace the line above by loading an existing graph:
-    # graph = ox.load_graphml("area.graphml")
-
-    # Use the nearest network node (from given location) as the start.
-    start = ox.distance.nearest_nodes(graph, X=longitude, Y=latitude)
-
-    # Example value. Insert the features of the entire reference race here later.
-    reference = {}
-    reference["distance_m"] = 10000
-
-    routes = generate_routes(graph, start, reference)
-
-    route_number = 1
-    for route in routes:
-        print("route:", route_number)
-        print("features:", route["features"])
-        print("relative error:", route["error"])
-        route_number = route_number + 1
-
-    if len(routes) == 0:
-        print("No route found; adjust search area and/or number of attempts.")
+    # Create a GPX file with one track and one segment (GPX file is tructured hierarchically)
+    gpx = gpxpy.gpx.GPX() # Empty GPX file
+    track = gpxpy.gpx.GPXTrack() # Empty GPX file track
+    gpx.tracks.append(track)
+    segment = gpxpy.gpx.GPXTrackSegment() # Empty GPX file track segment
+    track.segments.append(segment)
+    # Include bends in the paths between the nodes
+    edges = ox.routing.route_to_gdf(graph, route, weight="length")
+    # Remember the previous point to avoid adding it twice
+    previous = None
+    for index, geometry in enumerate(edges.geometry):
+        coordinates = list(geometry.coords)
+        node = graph.nodes[route[index]]
+        # Check which end is closer to the start of this path
+        first_distance = (coordinates[0][0] - node["x"]) ** 2 + (coordinates[0][1] - node["y"]) ** 2
+        last_distance = (coordinates[-1][0] - node["x"]) ** 2 + (coordinates[-1][1] - node["y"]) ** 2
+        # Some edge geometries are stored in the opposite direction, we need to handle that corner case
+        if last_distance < first_distance:
+            coordinates.reverse()
+        for coordinate in coordinates:
+            if coordinate != previous:
+                segment.points.append(gpxpy.gpx.GPXTrackPoint(coordinate[1], coordinate[0])) # GPX needs latitude first, then longitude
+                previous = coordinate
+    # Returning file in XML format contents for the GPX download
+    return gpx.to_xml().encode("utf-8")

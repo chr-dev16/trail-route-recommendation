@@ -1,6 +1,7 @@
 import streamlit as st
 from pathlib import Path
 import json
+import tempfile
 import pandas as pd
 import plotly.graph_objects as go
 import osmnx as ox
@@ -8,7 +9,7 @@ from trail_route_recommendation.data.gpx import resample_route
 from trail_route_recommendation.data.osm_pruning_debugging import format_sac_scale
 from trail_route_recommendation.data.worldcover import extract_worldcover_features
 from trail_route_recommendation.data.dem import extract_dem_features
-from trail_route_recommendation.routing.route_generator import similarity_error, osm_features
+from trail_route_recommendation.routing.route_generator import similarity_error, osm_features, generate_routes, route_to_gpx
 from ui.settings import OSM_TAGS
 from ui.data_loading import load_uploaded_route, load_uploaded_graph, get_matched_edges
 from ui.route_display import add_gpx, add_graph, add_matched_edges, render_map
@@ -106,7 +107,7 @@ def extract_comparison_features(gpx_bytes, graphml_bytes, gpx_name, route_number
 
 
 def get_group_error(candidate, reference, scales, group):
-    group_weights = {"distance": 0.0, "dtm": 0.0, "worldcover": 0.0, "osm": 0.0}
+    group_weights = {"distance": 0.0, "dem": 0.0, "worldcover": 0.0, "osm": 0.0}
     group_weights[group] = 1.0 # Only activate the group that was passed to the function
     return similarity_error(candidate, reference, scales=scales, group_weights=group_weights)
 
@@ -127,11 +128,11 @@ def show_feature_comparison(route_1, route_2):
         candidate,
         reference,
         scales=scales, # Normalisation is happening here
-        group_weights={"distance": 0.0, "dtm": 1.0, "worldcover": 1.0, "osm": 1.0}, # Overall similarity error is calculated by equal feature group weighting
+        group_weights={"distance": 0.0, "dem": 1.0, "worldcover": 1.0, "osm": 1.0}, # Overall similarity error is calculated by equal feature group weighting
     )
 
     # get group errors for displaying
-    dtm_error = get_group_error(candidate, reference, scales, "dtm")
+    dtm_error = get_group_error(candidate, reference, scales, "dem")
     worldcover_error = get_group_error(candidate, reference, scales, "worldcover")
     osm_error = get_group_error(candidate, reference, scales, "osm")
 
@@ -154,7 +155,89 @@ def show_feature_comparison(route_1, route_2):
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch") # Comparison table
 
 
-def show_route(route_source, column, route_number):
+
+# Keep downloaded graphs for later use.
+@st.cache_resource(max_entries=3)
+def load_generation_graph(latitude, longitude, half_width):
+    # Keep these tags during subsequent OSM download for the feature comparison
+    for tag in ["highway", "surface", "sac_scale", "tracktype"]:
+        if tag not in ox.settings.useful_tags_way:
+            ox.settings.useful_tags_way.append(tag)
+    # OSM graph is downloaded from Overpass API. Converting kilometres to metres for the download area.
+    graph = ox.graph_from_point((latitude, longitude), dist=half_width * 1000,
+                               dist_type="bbox", network_type="walk")
+    # Save the graph to then read it as file contents (bytes)
+    with tempfile.TemporaryDirectory() as folder:
+        graph_path = Path(folder) / "generated_area.graphml"
+        ox.save_graphml(graph, filepath=graph_path)
+        graph_bytes = graph_path.read_bytes()
+    return graph, graph_bytes
+
+
+def select_generated_route(reference):
+    if reference is None:
+        st.info("Select Route 1 before generating a route.")
+        return None
+    reference_route = load_uploaded_route(reference["gpx_bytes"])
+    # Reference distance in metres is calculated in metric CRS
+    reference_distance = reference_route.to_crs(reference_route.estimate_utm_crs()).length.sum()
+
+    # Most generation parameters are specified by the user in the sidebar
+    latitude = st.sidebar.number_input("Start latitude", min_value=-89.0, max_value=89.0,
+                                       value=47.40881, format="%.5f")
+    longitude = st.sidebar.number_input("Start longitude", min_value=-180.0, max_value=180.0,
+                                        value=10.29202, format="%.5f")
+    half_width = st.sidebar.number_input("Search half-width (km)", min_value=1.0, value=10.0)
+    attempts = st.sidebar.number_input("Search attempts", min_value=1, value=100, step=10)
+    seed = st.sidebar.number_input("Random seed", min_value=0, value=42, step=1)
+    st.sidebar.caption("Round trips; target distance: " + str(round(reference_distance / 1000, 2))
+                       + " km, with 20% tolerance. Search uses distance only.")
+    # Saving the settings which were used for these routes.
+    settings = (reference["gpx_bytes"], latitude, longitude, half_width, attempts, seed)
+    if st.sidebar.button("Generate routes"): # Below runs once user starts route generation
+        st.session_state.pop("generated_result", None)  # Old results are cleared before re-start
+        try:
+            with st.spinner("Loading the OSM network and searching for round trips..."):
+                graph, graph_bytes = load_generation_graph(latitude, longitude, half_width)
+                # Find the nearest point in the OSM network.
+                start = ox.distance.nearest_nodes(graph, X=longitude, Y=latitude)
+                # Use only distance to choose routes for now.
+                candidates = generate_routes(graph, start, {"distance_m": reference_distance},
+                                             attempts=attempts, seed=seed)
+                # Prepare a GPX file for each route.
+                gpx_files = []
+                for candidate in candidates:
+                    gpx_files.append(route_to_gpx(graph, candidate["nodes"]))
+                # Keep the results when the user changes the displayed candidate.
+                st.session_state["generated_result"] = {
+                    "settings": settings, "gpx_files": gpx_files, "graph_bytes": graph_bytes,
+                }
+        except Exception as error:
+            st.error("Could not generate routes: " + str(error))
+    result = st.session_state.get("generated_result")
+    if result is None:
+        return None
+    # User is asked for a new search if settings have changed. Route generation is stopped
+    if result["settings"] != settings:
+        st.info("Settings changed. Click Generate routes to update the results.")
+        return None
+    if not result["gpx_files"]:
+        st.warning("No round trip found within the distance range. Try more attempts or another seed.")
+        return None
+    
+    route_choice = []   # Create names for the route dropdown
+    for index in range(len(result["gpx_files"])):
+        route_choice.append("Candidate " + str(index + 1))
+    selected = st.selectbox("Generated route", route_choice) # Collect clicked race in drpodown
+    index = route_choice.index(selected)
+    name = "generated_route_" + str(index + 1) + ".gpx"
+    gpx_bytes = result["gpx_files"][index]
+    st.download_button("Download generated GPX", gpx_bytes, file_name=name,
+                       mime="application/gpx+xml")
+    return {"gpx_bytes": gpx_bytes, "graphml_bytes": result["graph_bytes"], "gpx_name": name}
+
+
+def show_route(route_source, column, route_number, generated_route=None):
     """Load and display one route with its optional OSM graph and matching."""
     # Keep the existing labels, which Streamlit also uses to identify widgets. Configuring labels according to route_number makes the rest of the code below more concise.
     labels = {
@@ -174,7 +257,15 @@ def show_route(route_source, column, route_number):
     graphml_name = ""
 
     try:
-        if route_source == "Upload files":
+        # Show generated routes in the same way as uploaded routes.
+        if route_source == "Generate route":
+            if generated_route is None:
+                return None
+            gpx_bytes = generated_route["gpx_bytes"]
+            graphml_bytes = generated_route["graphml_bytes"]
+            gpx_name = generated_route["gpx_name"]
+            graphml_name = "Generated walking network"
+        elif route_source == "Upload files":
             uploaded_gpx = st.sidebar.file_uploader(labels["gpx"], type=["gpx"], key="gpx_" + str(route_number)) # Show Streamlit file upload element if "Upload files" is selected
             uploaded_graphml = st.sidebar.file_uploader(labels["graphml"], type=["graphml"], key="graphml_" + str(route_number))
             if uploaded_gpx is not None:
@@ -283,12 +374,16 @@ if compare_routes:
 else:
     left = st.container()
 
-route_1 = show_route(route_source, left, 1)
+route_1 = show_route(route_source, left, 1) # Displaying reference route in the left app column
 
 if compare_routes:
     st.sidebar.header("Route 2")
-    route_source = st.sidebar.radio("Route 2 source", ["Upload files", "Saved race"], key="route_2_source") # Single option selection with "radio" buttons
-    route_2 = show_route(route_source, right, 2)
+    route_source = st.sidebar.radio("Route 2 source", ["Upload files", "Saved race", "Generate route"], key="route_2_source") # Single option selection with "radio" buttons
+    generated_route = None
+    if route_source == "Generate route":
+        with right:
+            generated_route = select_generated_route(route_1)
+    route_2 = show_route(route_source, right, 2, generated_route) # Displaying generated route in the right app column
 
     if route_1 is not None and route_2 is not None:
         try:

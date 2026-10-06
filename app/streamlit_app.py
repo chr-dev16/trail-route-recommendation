@@ -7,7 +7,7 @@ import osmnx as ox
 from trail_route_recommendation.data.gpx import resample_route
 from trail_route_recommendation.data.osm_pruning_debugging import format_sac_scale
 from trail_route_recommendation.data.worldcover import extract_worldcover_features
-from trail_route_recommendation.data.dtm import extract_dtm_features
+from trail_route_recommendation.data.dem import extract_dem_features
 from trail_route_recommendation.routing.route_generator import similarity_error, osm_features
 from ui.settings import OSM_TAGS
 from ui.data_loading import load_uploaded_route, load_uploaded_graph, get_matched_edges
@@ -80,7 +80,7 @@ def extract_comparison_features(gpx_bytes, graphml_bytes, gpx_name, route_number
     # 1. Collect DTM features
     route = load_uploaded_route(gpx_bytes)
     points = resample_route(route, spacing_metres=30) # resampling with 30 m intervals
-    features = extract_dtm_features(gpx_path, **FEATURE_OPTIONS["dtm"])
+    features = extract_dem_features(gpx_path, **FEATURE_OPTIONS["dtm"])
 
     # 2. Collect WorldCover features
     worldcover = extract_worldcover_features(gpx_path, **FEATURE_OPTIONS["worldcover"])

@@ -89,10 +89,11 @@ def osm_features(edge_data, lengths):
     return features
 
 
-def route_features(graph, route):
+def route_features(graph, route, edges=None):
     """Calculate the features of a complete route."""
     # The route is identified by node IDs. OSMnx returns the corresponding path sections.
-    edges = ox.routing.route_to_gdf(graph, route, weight="length")
+    if edges is None: # The search can pass the edges to avoid loading them twice, but edges can be extracted from OSM graph
+        edges = ox.routing.route_to_gdf(graph, route, weight="length")
 
     distance_m = 0.0
     for edge_length in edges["length"]:
@@ -242,15 +243,57 @@ def similarity_error(features, reference, weights=None, scales=None, group_weigh
     return weighted_error / total_weight # Essentially a weighted mean is calculated
 
 
+def calculate_repeat_fraction(edges):
+    # Count extra visits to the same path, also when running back the other way (OSM graph is directed)
+    seen_edges = set() # Use set because it is not considered how often an edge is visited repeatedly, but often **if** it is visited repeatedly
+    total_distance = 0.0
+    repeated_distance = 0.0
+    for edge_id, edge in edges.iterrows(): # Iterate through all edges in graph
+        u, v, key = edge_id
+        coordinates = tuple(edge.geometry.coords)
+        reverse_coordinates = tuple(reversed(coordinates))
+        if reverse_coordinates < coordinates:
+            coordinates = reverse_coordinates # Use the same order for both directions
+        osm_ids = edge.get("osmid", [])
+        if not isinstance(osm_ids, list): # Making osm_ids iterable
+            osm_ids = [osm_ids]
+        osm_id_strings = []
+        for osm_id in osm_ids:
+            osm_id_strings.append(str(osm_id))
+        osm_id_strings.sort()
+        # Two different paths can connect the same nodes, so also check their shape and OSM IDs for the clear path identifier
+        path_id = (min(u, v), max(u, v), tuple(osm_id_strings), coordinates)
+        length = float(edge["length"])
+        total_distance = total_distance + length
+        if path_id in seen_edges:
+            repeated_distance = repeated_distance + length
+        else:
+            seen_edges.add(path_id)
+    if total_distance == 0:
+        return 0.0
+    return repeated_distance / total_distance
+
+
 def get_error(candidate):
     """This gettter function returns the value that is used for sorting candidates later."""
-    return candidate["error"]
+    return candidate.get("total_error", candidate["error"]) # Include the penalty when sorting
 
 
-def generate_routes(graph, start, reference, attempts=100, top_k=3, seed=42):
+def generate_routes(graph, start, reference, attempts=100, top_k=3, seed=42,
+                    distance_range=None):
     """Generate several routes and return the best ones."""
     if reference["distance_m"] <= 0:
         raise ValueError("Reference distance must be positive.")
+
+    minimum_distance = reference["distance_m"] * 0.80
+    maximum_distance = reference["distance_m"] * 1.20
+    if distance_range is not None:
+        minimum_distance, maximum_distance = distance_range # Both values are in metres
+    if (not math.isfinite(minimum_distance) or not math.isfinite(maximum_distance)
+            or minimum_distance <= 0 or maximum_distance < minimum_distance):
+        raise ValueError("Use a positive minimum distance and a maximum at least as large.")
+    reference = reference.copy() # Keep the original reference unchanged
+    reference["distance_m"] = (minimum_distance + maximum_distance) / 2
 
     # Using the same seed makes the random selection reproducible.
     random_generator = random.Random(seed)
@@ -298,21 +341,23 @@ def generate_routes(graph, start, reference, attempts=100, top_k=3, seed=42):
             continue
         seen_routes.append(route)
 
-        features = route_features(graph, route)
+        edges = ox.routing.route_to_gdf(graph, route, weight="length")
+        features = route_features(graph, route, edges) # Reuse these edges for the repetition check below
 
-        # Only keep routes with a distance deviation of at most 20%.
-        distance_difference = abs(features["distance_m"] - reference["distance_m"])
-        relative_difference = distance_difference / reference["distance_m"]
-        if relative_difference > 0.20:
+        # Keep only routes inside the chosen distance range
+        if features["distance_m"] < minimum_distance or features["distance_m"] > maximum_distance:
             continue
 
         candidate = {}
         candidate["nodes"] = route
         candidate["features"] = features
         candidate["error"] = similarity_error(features, reference)
+        candidate["repeat_fraction"] = calculate_repeat_fraction(edges)
+        candidate["repeat_penalty"] = max(0.0, candidate["repeat_fraction"] - 0.10) # 10% repetition are allowed because especially in trail running short out-and-back segments are ok, for example to reach summits
+        candidate["total_error"] = candidate["error"] + candidate["repeat_penalty"]
         candidates.append(candidate)
 
-    # Sort by deviation in ascending order and select max. top_k routes.
+    # Sort by distance error plus repetition penalty and select max. top_k routes for displaying in Streamlit app
     candidates.sort(key=get_error)
     best_routes = []
     for candidate in candidates:

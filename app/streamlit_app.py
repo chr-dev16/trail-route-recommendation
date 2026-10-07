@@ -188,22 +188,31 @@ def select_generated_route(reference):
     longitude = st.sidebar.number_input("Start longitude", min_value=-180.0, max_value=180.0,
                                         value=10.29202, format="%.5f")
     half_width = st.sidebar.number_input("Search half-width (km)", min_value=1.0, value=10.0)
+    # Default is 80% - 120% of distance of reference route, but user can change it
+    minimum = st.sidebar.number_input("Minimum distance (km)", min_value=0.1,
+                                      value=max(0.1, round(reference_distance / 1000 * 0.8, 2)), step=0.1)
+    maximum = st.sidebar.number_input("Maximum distance (km)", min_value=0.1,
+                                      value=max(0.1, round(reference_distance / 1000 * 1.2, 2)), step=0.1)
     attempts = st.sidebar.number_input("Search attempts", min_value=1, value=100, step=10)
     seed = st.sidebar.number_input("Random seed", min_value=0, value=42, step=1)
-    st.sidebar.caption("Round trips; target distance: " + str(round(reference_distance / 1000, 2))
-                       + " km, with 20% tolerance. Search uses distance only.")
-    # Saving the settings which were used for these routes.
-    settings = (reference["gpx_bytes"], latitude, longitude, half_width, attempts, seed)
+    st.sidebar.caption("Round trips: " + str(minimum) + "-" + str(maximum)
+                       + " km. Search uses distance and a penalty for repetition above 10%.")
+    if minimum > maximum: # Stop here if the range does not make sense
+        st.warning("Minimum distance must not exceed maximum distance.")
+        return None
+    # Saving the settings which were used for these routes
+    settings = (reference["gpx_bytes"], latitude, longitude, half_width, attempts, seed, minimum, maximum)
     if st.sidebar.button("Generate routes"): # Below runs once user starts route generation
         st.session_state.pop("generated_result", None)  # Old results are cleared before re-start
         try:
             with st.spinner("Loading the OSM network and searching for round trips..."):
                 graph, graph_bytes = load_generation_graph(latitude, longitude, half_width)
                 # Find the nearest point in the OSM network.
-                start = ox.distance.nearest_nodes(graph, X=longitude, Y=latitude)
-                # Use only distance to choose routes for now.
-                candidates = generate_routes(graph, start, {"distance_m": reference_distance},
-                                             attempts=attempts, seed=seed)
+                start_node = ox.distance.nearest_nodes(graph, X=longitude, Y=latitude)
+                # Generate routes by distance and repeated path share
+                candidates = generate_routes(graph, start_node, {"distance_m": reference_distance},
+                                             attempts=attempts, seed=seed,
+                                             distance_range=(minimum * 1000, maximum * 1000)) # Convert km to metres
                 # Prepare a GPX file for each route.
                 gpx_files = []
                 for candidate in candidates:
@@ -211,6 +220,7 @@ def select_generated_route(reference):
                 # Keep the results when the user changes the displayed candidate.
                 st.session_state["generated_result"] = {
                     "settings": settings, "gpx_files": gpx_files, "graph_bytes": graph_bytes,
+                    "candidates": candidates, # Keep the scores for the selected route as well
                 }
         except Exception as error:
             st.error("Could not generate routes: " + str(error))
@@ -230,6 +240,11 @@ def select_generated_route(reference):
         route_choice.append("Candidate " + str(index + 1))
     selected = st.selectbox("Generated route", route_choice) # Collect clicked race in drpodown
     index = route_choice.index(selected)
+    candidate = result["candidates"][index]
+    st.caption("Distance error: " + str(round(candidate["error"], 4))
+                + " | Repeated distance: " + str(round(candidate["repeat_fraction"] * 100, 1)) + "%"
+                + " | Penalty: " + str(round(candidate["repeat_penalty"], 4))
+                + " | Search score: " + str(round(candidate["total_error"], 4)))
     name = "generated_route_" + str(index + 1) + ".gpx"
     gpx_bytes = result["gpx_files"][index]
     st.download_button("Download generated GPX", gpx_bytes, file_name=name,

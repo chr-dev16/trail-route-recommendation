@@ -280,7 +280,7 @@ def get_error(candidate):
 
 
 def generate_routes(graph, start, reference, attempts=100, top_k=3, seed=42,
-                    distance_range=None):
+                    distance_range=None, end=None):
     """Generate several routes and return the best ones."""
     if reference["distance_m"] <= 0:
         raise ValueError("Reference distance must be positive.")
@@ -295,48 +295,69 @@ def generate_routes(graph, start, reference, attempts=100, top_k=3, seed=42,
     reference = reference.copy() # Keep the original reference unchanged
     reference["distance_m"] = (minimum_distance + maximum_distance) / 2
 
+    if end is None:
+        end = start # Without a separate finish, keep the round trip
+    if start not in graph or end not in graph:
+        raise ValueError("Start and finish must be nodes in the graph.")
+    direct_route = None
+    if end != start:
+        direct_route = ox.routing.shortest_path(graph, start, end, weight="length")
+        if direct_route is None:
+            raise ValueError("No walking connection between start and finish in this area.")
+        if route_features(graph, direct_route)["distance_m"] > maximum_distance:
+            raise ValueError("Even the shortest connection is longer than the maximum distance.")
+
     # Using the same seed makes the random selection reproducible.
     random_generator = random.Random(seed)
 
-    # All nodes from the OSM graph, except the start, can serve as waypoints.
     possible_waypoint_nodes = []
     for node in graph.nodes:
-        if node != start:
+        if node != start and node != end: # Keep start and finish out of the waypoint selection
             possible_waypoint_nodes.append(node)
 
     candidates = []
     seen_routes = []
 
-    if len(possible_waypoint_nodes) < 2:
-        return candidates
+    if len(possible_waypoint_nodes) < 2 and end == start:
+        return candidates # This is not a viable candidate route
 
-    for _ in range(attempts):
-        # Randomly select two distinct waypoints.
-        waypoints = random_generator.sample(possible_waypoint_nodes, 2)
-        first_waypoint = waypoints[0]
-        second_waypoint = waypoints[1]
+    for attempt in range(-1, attempts):
+        if attempt == -1: # First try the direct route, without waypoints
+            if direct_route is None:
+                continue
+            waypoints = []
+            first_leg = direct_route
+            second_leg = [end]
+            third_leg = [end]
+        else:
+            if len(possible_waypoint_nodes) < 2:
+                break
+            # Randomly select two distinct waypoints
+            waypoints = random_generator.sample(possible_waypoint_nodes, 2)
+            first_waypoint = waypoints[0]
+            second_waypoint = waypoints[1]
 
-        # When having two waypoints, three consecutive shortest paths together form a closed route.
-        first_leg = ox.routing.shortest_path(graph, start, first_waypoint, weight="length")
-        second_leg = ox.routing.shortest_path(graph, first_waypoint, second_waypoint, weight="length")
-        third_leg = ox.routing.shortest_path(graph, second_waypoint, start, weight="length")
+            # Join the start, both waypoints and the chosen finish
+            first_leg = ox.routing.shortest_path(graph, start, first_waypoint, weight="length")
+            second_leg = ox.routing.shortest_path(graph, first_waypoint, second_waypoint, weight="length")
+            third_leg = ox.routing.shortest_path(graph, second_waypoint, end, weight="length")
 
-        # If a connection is missing, this means that the route is not closed --> Continue with the next attempt.
+        # If one section is missing, try another pair of waypoints
         if first_leg is None or second_leg is None or third_leg is None:
             continue
 
         # Build the route trajectory that is composed by the three legs.
         route = list(first_leg)
 
-        # The first node of the next leg is already included because end of each leg is identical with start of next leg.
-        # Therefore, start at index 1 and append the remaining nodes each time.
+        # The first node of the next leg is already included because end of each leg is identical with start of next leg
+        # Therefore, start at index 1 and append the remaining nodes each time
         for index in range(1, len(second_leg)):
             route.append(second_leg[index])
 
         for index in range(1, len(third_leg)):
             route.append(third_leg[index])
 
-        # Do not evaluate the exact same node sequence more than once.
+        # Do not evaluate the exact same node sequence more than once
         if route in seen_routes:
             continue
         seen_routes.append(route)
@@ -350,6 +371,7 @@ def generate_routes(graph, start, reference, attempts=100, top_k=3, seed=42,
 
         candidate = {}
         candidate["nodes"] = route
+        candidate["waypoints"] = waypoints # Keep them for the map
         candidate["features"] = features
         candidate["error"] = similarity_error(features, reference)
         candidate["repeat_fraction"] = calculate_repeat_fraction(edges)

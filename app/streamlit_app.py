@@ -158,14 +158,22 @@ def show_feature_comparison(route_1, route_2):
 
 # Keep downloaded graphs for later use.
 @st.cache_resource(max_entries=3)
-def load_generation_graph(latitude, longitude, half_width):
+def load_generation_graph(latitude, longitude, half_width, end_latitude=None, end_longitude=None):
     # Keep these tags during subsequent OSM download for the feature comparison
     for tag in ["highway", "surface", "sac_scale", "tracktype"]:
         if tag not in ox.settings.useful_tags_way:
             ox.settings.useful_tags_way.append(tag)
     # OSM graph is downloaded from Overpass API. Converting kilometres to metres for the download area.
-    graph = ox.graph_from_point((latitude, longitude), dist=half_width * 1000,
-                               dist_type="bbox", network_type="walk")
+    if end_latitude is None or end_longitude is None: # Case 1: Automatic finish
+        graph = ox.graph_from_point((latitude, longitude), dist=half_width * 1000,
+                                   dist_type="bbox", network_type="walk")
+    else: # Cases 2 & 3: Round trip and user-specified finish
+        # Include the area around both start and finish
+        start_bounds = ox.utils_geo.bbox_from_point((latitude, longitude), dist=half_width * 1000)
+        end_bounds = ox.utils_geo.bbox_from_point((end_latitude, end_longitude), dist=half_width * 1000)
+        bounds = (min(start_bounds[0], end_bounds[0]), min(start_bounds[1], end_bounds[1]),
+                  max(start_bounds[2], end_bounds[2]), max(start_bounds[3], end_bounds[3]))
+        graph = ox.graph_from_bbox(bounds, network_type="walk", retain_all=True)
     # Save the graph to then read it as file contents (bytes)
     with tempfile.TemporaryDirectory() as folder:
         graph_path = Path(folder) / "generated_area.graphml"
@@ -187,6 +195,13 @@ def select_generated_route(reference):
                                        value=47.40881, format="%.5f")
     longitude = st.sidebar.number_input("Start longitude", min_value=-180.0, max_value=180.0,
                                         value=10.29202, format="%.5f")
+    mode = st.sidebar.selectbox("Finish", ["Round trip", "Choose coordinates"])
+    end_latitude, end_longitude = None, None # A round trip ends at the start
+    if mode == "Choose coordinates":
+        end_latitude = st.sidebar.number_input("Finish latitude", min_value=-89.0, max_value=89.0,
+                                               value=47.40881, format="%.5f")
+        end_longitude = st.sidebar.number_input("Finish longitude", min_value=-180.0, max_value=180.0,
+                                                value=10.29202, format="%.5f")
     half_width = st.sidebar.number_input("Search half-width (km)", min_value=1.0, value=10.0)
     # Default is 80% - 120% of distance of reference route, but user can change it
     minimum = st.sidebar.number_input("Minimum distance (km)", min_value=0.1,
@@ -195,28 +210,40 @@ def select_generated_route(reference):
                                       value=max(0.1, round(reference_distance / 1000 * 1.2, 2)), step=0.1)
     attempts = st.sidebar.number_input("Search attempts", min_value=1, value=100, step=10)
     seed = st.sidebar.number_input("Random seed", min_value=0, value=42, step=1)
-    st.sidebar.caption("Round trips: " + str(minimum) + "-" + str(maximum)
+    st.sidebar.caption(mode + ": " + str(minimum) + "-" + str(maximum)
                        + " km. Search uses distance and a penalty for repetition above 10%.")
     if minimum > maximum: # Stop here if the range does not make sense
         st.warning("Minimum distance must not exceed maximum distance.")
         return None
     # Saving the settings which were used for these routes
-    settings = (reference["gpx_bytes"], latitude, longitude, half_width, attempts, seed, minimum, maximum)
+    settings = (reference["gpx_bytes"], latitude, longitude, half_width, attempts, seed, minimum, maximum,
+                mode, end_latitude, end_longitude)
     if st.sidebar.button("Generate routes"): # Below runs once user starts route generation
         st.session_state.pop("generated_result", None)  # Old results are cleared before re-start
         try:
-            with st.spinner("Loading the OSM network and searching for round trips..."):
-                graph, graph_bytes = load_generation_graph(latitude, longitude, half_width)
+            with st.spinner("Loading the OSM network and searching for routes..."):
+                graph, graph_bytes = load_generation_graph(latitude, longitude, half_width,
+                                                            end_latitude, end_longitude)
                 # Find the nearest point in the OSM network.
                 start_node = ox.distance.nearest_nodes(graph, X=longitude, Y=latitude)
+                end_node = start_node
+                if mode == "Choose coordinates":
+                    end_node = ox.distance.nearest_nodes(graph, X=end_longitude, Y=end_latitude)
+                    if end_node == start_node: # Both coordinates ended up at the same OSM node
+                        raise ValueError("Start and finish are too close. Choose another finish or use Round trip.")
                 # Generate routes by distance and repeated path share
                 candidates = generate_routes(graph, start_node, {"distance_m": reference_distance},
-                                             attempts=attempts, seed=seed,
+                                             attempts=attempts, seed=seed, end=end_node,
                                              distance_range=(minimum * 1000, maximum * 1000)) # Convert km to metres
                 # Prepare a GPX file for each route.
                 gpx_files = []
                 for candidate in candidates:
                     gpx_files.append(route_to_gpx(graph, candidate["nodes"]))
+                    marker_nodes = [candidate["nodes"][0]] + candidate["waypoints"] + [candidate["nodes"][-1]]
+                    markers = []
+                    for node in marker_nodes:
+                        markers.append((graph.nodes[node]["x"], graph.nodes[node]["y"]))
+                    candidate["markers"] = markers # Save map positions while the graph is available
                 # Keep the results when the user changes the displayed candidate.
                 st.session_state["generated_result"] = {
                     "settings": settings, "gpx_files": gpx_files, "graph_bytes": graph_bytes,
@@ -232,7 +259,7 @@ def select_generated_route(reference):
         st.info("Settings changed. Click Generate routes to update the results.")
         return None
     if not result["gpx_files"]:
-        st.warning("No round trip found within the distance range. Try more attempts or another seed.")
+        st.warning("No route found within the distance range. Try more attempts or another seed.")
         return None
     
     route_choice = []   # Create names for the route dropdown
@@ -249,7 +276,8 @@ def select_generated_route(reference):
     gpx_bytes = result["gpx_files"][index]
     st.download_button("Download generated GPX", gpx_bytes, file_name=name,
                        mime="application/gpx+xml")
-    return {"gpx_bytes": gpx_bytes, "graphml_bytes": result["graph_bytes"], "gpx_name": name}
+    return {"gpx_bytes": gpx_bytes, "graphml_bytes": result["graph_bytes"], "gpx_name": name,
+            "markers": candidate["markers"]} # Pass the points to the map below
 
 
 def show_route(route_source, column, route_number, generated_route=None):
@@ -350,6 +378,23 @@ def show_route(route_source, column, route_number, generated_route=None):
                 with st.spinner("Matching GPX points to OSM edges..."): # Show in UI that matching is ongoing. Spinner stops when code execution in with-block is completed
                     matched_edges = get_matched_edges(gpx_bytes, graphml_bytes, gpx_name)
                 add_matched_edges(traces, matched_edges, selected_tag, selected_values)
+
+            if generated_route is not None and st.sidebar.checkbox("Show start, finish and waypoints", value=True):
+                markers = generated_route["markers"]
+                for index, point in enumerate(markers): # Extract Streamlit markers for start and finish
+                    label = "Waypoint " + str(index)
+                    colour = "purple"
+                    if index == 0:
+                        label, colour = "Start", "blue"
+                    elif index == len(markers) - 1:
+                        label, colour = "Finish", "green"
+                    # A round trip only needs one marker for start and finish
+                    if index == 0 and markers[0] == markers[-1]:
+                        label = "Start / finish"
+                    if index == len(markers) - 1 and markers[0] == markers[-1]:
+                        continue
+                    traces.append(go.Scattermap(lon=[point[0]], lat=[point[1]], mode="markers",
+                                                marker={"size": 11, "color": colour}, name=label))
 
             if traces:
                 if route_number == 2:

@@ -90,6 +90,8 @@ def extract_comparison_features(gpx_bytes, graphml_bytes, gpx_name, route_number
         "bare_sparse_vegetation", "snow_ice", "permanent_water",
         "herbaceous_wetland", "mangroves", "moss_lichen",
     ]
+    if not worldcover: # Missing raster data should not look like a route with zero shares
+        raise ValueError("No WorldCover data found for the reference or comparison route.")
     for name in class_names:
         features[name] = worldcover.get(name, 0.0)
 
@@ -119,9 +121,11 @@ def show_feature_comparison(route_1, route_2):
         reference = extract_comparison_features(
             route_1["gpx_bytes"], route_1["graphml_bytes"], route_1["gpx_name"], 1,
         )
-        candidate = extract_comparison_features(
-            route_2["gpx_bytes"], route_2["graphml_bytes"], route_2["gpx_name"], 2,
-        )
+        candidate = route_2.get("features") # Generated routes have already been measured
+        if candidate is None:
+            candidate = extract_comparison_features(
+                route_2["gpx_bytes"], route_2["graphml_bytes"], route_2["gpx_name"], 2,
+            )
 
     scales = load_feature_scales()
     overall_error = similarity_error(
@@ -210,18 +214,33 @@ def select_generated_route(reference):
                                       value=max(0.1, round(reference_distance / 1000 * 1.2, 2)), step=0.1)
     attempts = st.sidebar.number_input("Search attempts", min_value=1, value=100, step=10)
     seed = st.sidebar.number_input("Random seed", min_value=0, value=42, step=1)
+    dem_weight = st.sidebar.number_input("DTM weight", min_value=0.0, value=1.0, step=0.5)
+    wc_weight = st.sidebar.number_input("WorldCover weight", min_value=0.0, value=1.0, step=0.5)
+    osm_weight = st.sidebar.number_input("OSM weight", min_value=0.0, value=1.0, step=0.5)
+    # Distance only sets the allowed range now; the other features choose the best routes
+    groups = {"distance": 0.0, "dem": dem_weight, "worldcover": wc_weight, "osm": osm_weight}
+    if dem_weight + wc_weight + osm_weight == 0:
+        st.warning("Select at least one positive feature weight.")
+        return None
     st.sidebar.caption(mode + ": " + str(minimum) + "-" + str(maximum)
-                       + " km. Search uses distance and a penalty for repetition above 10%.")
+                       + " km. Search matches DTM, WorldCover and OSM, with a penalty for repetition above 10%.")
     if minimum > maximum: # Stop here if the range does not make sense
         st.warning("Minimum distance must not exceed maximum distance.")
         return None
     # Saving the settings which were used for these routes
     settings = (reference["gpx_bytes"], latitude, longitude, half_width, attempts, seed, minimum, maximum,
-                mode, end_latitude, end_longitude)
+                mode, end_latitude, end_longitude, reference["graphml_bytes"],
+                dem_weight, wc_weight, osm_weight) # Changed weights also need a new search
     if st.sidebar.button("Generate routes"): # Below runs once user starts route generation
         st.session_state.pop("generated_result", None)  # Old results are cleared before re-start
         try:
             with st.spinner("Loading the OSM network and searching for routes..."):
+                # Use the same reference features and scales as in the comparison below
+                reference_features = extract_comparison_features(
+                    reference["gpx_bytes"], reference["graphml_bytes"], reference["gpx_name"], 1)
+                scales = load_feature_scales()
+                options = {"dem": FEATURE_OPTIONS["dtm"], "worldcover": FEATURE_OPTIONS["worldcover"], "osm": {}}
+                similarity_error(reference_features, reference_features, scales=scales, group_weights=groups)
                 graph, graph_bytes = load_generation_graph(latitude, longitude, half_width,
                                                             end_latitude, end_longitude)
                 # Find the nearest point in the OSM network.
@@ -231,9 +250,10 @@ def select_generated_route(reference):
                     end_node = ox.distance.nearest_nodes(graph, X=end_longitude, Y=end_latitude)
                     if end_node == start_node: # Both coordinates ended up at the same OSM node
                         raise ValueError("Start and finish are too close. Choose another finish or use Round trip.")
-                # Generate routes by distance and repeated path share
-                candidates = generate_routes(graph, start_node, {"distance_m": reference_distance},
+                # Compare valid routes by their features before choosing the best three
+                candidates = generate_routes(graph, start_node, reference_features,
                                              attempts=attempts, seed=seed, end=end_node,
+                                             feature_options=options, scales=scales, group_weights=groups,
                                              distance_range=(minimum * 1000, maximum * 1000)) # Convert km to metres
                 # Prepare a GPX file for each route.
                 gpx_files = []
@@ -268,16 +288,17 @@ def select_generated_route(reference):
     selected = st.selectbox("Generated route", route_choice) # Collect clicked race in drpodown
     index = route_choice.index(selected)
     candidate = result["candidates"][index]
-    st.caption("Distance error: " + str(round(candidate["error"], 4))
+    st.caption("Weighted feature error: " + str(round(candidate["error"], 4))
                 + " | Repeated distance: " + str(round(candidate["repeat_fraction"] * 100, 1)) + "%"
                 + " | Penalty: " + str(round(candidate["repeat_penalty"], 4))
                 + " | Search score: " + str(round(candidate["total_error"], 4)))
+    st.caption("Search uses your weights; the comparison below keeps equal group weights.")
     name = "generated_route_" + str(index + 1) + ".gpx"
     gpx_bytes = result["gpx_files"][index]
     st.download_button("Download generated GPX", gpx_bytes, file_name=name,
                        mime="application/gpx+xml")
     return {"gpx_bytes": gpx_bytes, "graphml_bytes": result["graph_bytes"], "gpx_name": name,
-            "markers": candidate["markers"]} # Pass the points to the map below
+            "markers": candidate["markers"], "features": candidate["features"]} # Reuse the features below
 
 
 def show_route(route_source, column, route_number, generated_route=None):
@@ -415,6 +436,7 @@ def show_route(route_source, column, route_number, generated_route=None):
                 "gpx_bytes": gpx_bytes,
                 "graphml_bytes": graphml_bytes,
                 "gpx_name": gpx_name,
+                "features": generated_route["features"] if generated_route is not None else None, # Uploads are measured later
             }
     except Exception as e:
         st.error("Could not read the route data: " + str(e)) # Ensures that error message appears in the app in case of a problem

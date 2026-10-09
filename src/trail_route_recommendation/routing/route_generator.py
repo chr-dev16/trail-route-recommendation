@@ -1,6 +1,10 @@
 import random
 import ast
 import math
+import tempfile
+from pathlib import Path
+from trail_route_recommendation.data.dem import extract_dem_features
+from trail_route_recommendation.data.worldcover import extract_worldcover_features
 import osmnx as ox
 
 # Define how OSM tags are aggregated into route features
@@ -89,8 +93,8 @@ def osm_features(edge_data, lengths):
     return features
 
 
-def route_features(graph, route, edges=None):
-    """Calculate the features of a complete route."""
+def route_features(graph, route, edges=None, feature_options=None):
+    """Calculate the features of a complete ruote"""
     # The route is identified by node IDs. OSMnx returns the corresponding path sections.
     if edges is None: # The search can pass the edges to avoid loading them twice, but edges can be extracted from OSM graph
         edges = ox.routing.route_to_gdf(graph, route, weight="length")
@@ -102,7 +106,36 @@ def route_features(graph, route, edges=None):
     features = {}
     features["distance_m"] = distance_m
 
-    # Add ascent, slope distribution, climbs, surface, etc. here later.
+    if feature_options is None:
+        return features # Keep the quick distance check for routes that are too long or too short
+
+    if "osm" in feature_options:
+        edge_data = []
+        lengths = []
+        for _, edge in edges.iterrows():
+            edge_data.append(edge)
+            lengths.append(float(edge["length"]))
+        features.update(osm_features(edge_data, lengths)) # We already know the exact OSM edges here
+
+    if "dem" in feature_options or "worldcover" in feature_options:
+        # Save the route as a temporary GPX file for DTM and WorldCover calculation
+        with tempfile.TemporaryDirectory() as folder:
+            gpx_path = Path(folder) / "candidate.gpx"
+            gpx_path.write_bytes(route_to_gpx(graph, route, edges))
+            if "dem" in feature_options:
+                features.update(extract_dem_features(gpx_path, **feature_options["dem"]))
+            if "worldcover" in feature_options:
+                worldcover = extract_worldcover_features(gpx_path, **feature_options["worldcover"])
+                if not worldcover:
+                    raise ValueError("No WorldCover data found for this route.")
+                class_names = [
+                    "tree_cover", "shrubland", "grassland", "cropland", "built_up",
+                    "bare_sparse_vegetation", "snow_ice", "permanent_water",
+                    "herbaceous_wetland", "mangroves", "moss_lichen",
+                ]
+                for name in class_names:
+                    features[name] = worldcover.get(name, 0.0) # A class can be absent in the route. Therefore default to 0.0
+
     return features
 
 
@@ -280,7 +313,7 @@ def get_error(candidate):
 
 
 def generate_routes(graph, start, reference, attempts=100, top_k=3, seed=42,
-                    distance_range=None, end=None):
+                    distance_range=None, end=None, feature_options=None, scales=None, group_weights=None):
     """Generate several routes and return the best ones."""
     if reference["distance_m"] <= 0:
         raise ValueError("Reference distance must be positive.")
@@ -294,6 +327,11 @@ def generate_routes(graph, start, reference, attempts=100, top_k=3, seed=42,
         raise ValueError("Use a positive minimum distance and a maximum at least as large.")
     reference = reference.copy() # Keep the original reference unchanged
     reference["distance_m"] = (minimum_distance + maximum_distance) / 2
+    if feature_options is not None:
+        if group_weights is None:
+            group_weights = {"distance": 0.0, "dem": 1.0, "worldcover": 1.0, "osm": 1.0} # default weighting for non-baseline configuration
+        # Check that reference values, scales and weights are valid; ignore the score
+        similarity_error(reference, reference, scales=scales, group_weights=group_weights)
 
     if end is None:
         end = start # Without a separate finish, keep the round trip
@@ -369,17 +407,21 @@ def generate_routes(graph, start, reference, attempts=100, top_k=3, seed=42,
         if features["distance_m"] < minimum_distance or features["distance_m"] > maximum_distance:
             continue
 
+        if feature_options is not None:
+            # Only read raster data for routes inside the distance range
+            features = route_features(graph, route, edges, feature_options)
+
         candidate = {}
         candidate["nodes"] = route
         candidate["waypoints"] = waypoints # Keep them for the map
         candidate["features"] = features
-        candidate["error"] = similarity_error(features, reference)
+        candidate["error"] = similarity_error(features, reference, scales=scales, group_weights=group_weights) # Error comes from weighted similarity error
         candidate["repeat_fraction"] = calculate_repeat_fraction(edges)
         candidate["repeat_penalty"] = max(0.0, candidate["repeat_fraction"] - 0.10) # 10% repetition are allowed because especially in trail running short out-and-back segments are ok, for example to reach summits
         candidate["total_error"] = candidate["error"] + candidate["repeat_penalty"]
         candidates.append(candidate)
 
-    # Sort by distance error plus repetition penalty and select max. top_k routes for displaying in Streamlit app
+    # Sort by feature error plus repetition penalty, then keep the best routes
     candidates.sort(key=get_error)
     best_routes = []
     for candidate in candidates:
@@ -390,7 +432,7 @@ def generate_routes(graph, start, reference, attempts=100, top_k=3, seed=42,
     return best_routes
 
 
-def route_to_gpx(graph, route):
+def route_to_gpx(graph, route, edges=None):
     """Export a route from a longitude/latitude CRS graph, including edge geometry."""
     import gpxpy.gpx
 
@@ -401,7 +443,8 @@ def route_to_gpx(graph, route):
     segment = gpxpy.gpx.GPXTrackSegment() # Empty GPX file track segment
     track.segments.append(segment)
     # Include bends in the paths between the nodes
-    edges = ox.routing.route_to_gdf(graph, route, weight="length")
+    if edges is None: # Reuse the edges when exporting during feature calculation
+        edges = ox.routing.route_to_gdf(graph, route, weight="length")
     # Remember the previous point to avoid adding it twice
     previous = None
     for index, geometry in enumerate(edges.geometry):

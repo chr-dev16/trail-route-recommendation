@@ -2,6 +2,8 @@ import streamlit as st
 from pathlib import Path
 import json
 import tempfile
+import gpxpy.gpx
+from shapely.ops import substring
 import pandas as pd
 import plotly.graph_objects as go
 import osmnx as ox
@@ -147,7 +149,7 @@ def show_feature_comparison(route_1, route_2):
         + " | WorldCover: " + str(round(worldcover_error, 4))
         + " | OSM: " + str(round(osm_error, 4))
     )
-    st.caption("Complete routes; DTM, WorldCover and OSM weighted equally. Distance is shown but not scored.")
+    st.caption("Selected reference versus Route 2; DTM, WorldCover and OSM weighted equally. Distance is shown but not scored.")
 
     rows = []
     for feature, value in reference.items():
@@ -301,6 +303,44 @@ def select_generated_route(reference):
             "markers": candidate["markers"], "features": candidate["features"]} # Reuse the features below
 
 
+def select_reference_segment(route, gpx_bytes, gpx_name):
+    metric_route = route.to_crs(route.estimate_utm_crs())
+    line = metric_route.geometry.iloc[0]
+    total_km = float(line.length) / 1000
+    if total_km <= 0:
+        st.warning("The reference route has no length.")
+        return None
+    # Reset the selection when another GPX file is loaded
+    if st.session_state.get("segment_source") != gpx_bytes:
+        st.session_state.pop("reference_segment", None)
+        st.session_state["segment_source"] = gpx_bytes  # Write the new GPX bytes as base for fresh segment selection
+    segment_start, segment_end = st.sidebar.slider("Reference segment (km)", min_value=0.0, max_value=total_km,
+                                    value=(0.0, total_km), step=min(0.1, total_km),
+                                    format="%.2f", key="reference_segment")
+    if segment_start >= segment_end:
+        st.warning("Choose a reference segment with different start and end distances.")
+        return None
+    st.sidebar.caption("Selected reference: " + str(round(segment_end - segment_start, 2)) + " km")
+    if segment_start == 0 and segment_end == total_km:
+        return gpx_bytes, gpx_name, route # Keep the original file when everything is selected
+
+    # Cut along the route, keeping bends and the original running direction
+    segment_route = metric_route.copy()
+    segment_route.geometry = [substring(line, segment_start * 1000, segment_end * 1000)] # Carving out the segment
+    segment_route = segment_route.to_crs("EPSG:4326") # Project to latitude, longitude
+    # Build the GPX of reference segment
+    gpx = gpxpy.gpx.GPX()
+    track = gpxpy.gpx.GPXTrack()
+    segment = gpxpy.gpx.GPXTrackSegment()
+    gpx.tracks.append(track)
+    track.segments.append(segment)
+    for coordinate in segment_route.geometry.iloc[0].coords:
+        segment.points.append(gpxpy.gpx.GPXTrackPoint(coordinate[1], coordinate[0]))
+    # Existing matching and feature functions can read this just like an uploaded GPX
+    name = "reference_segment_" + Path(gpx_name).name
+    return gpx.to_xml().encode("utf-8"), name, segment_route
+
+
 def show_route(route_source, column, route_number, generated_route=None):
     """Load and display one route with its optional OSM graph and matching."""
     # Keep the existing labels, which Streamlit also uses to identify widgets. Configuring labels according to route_number makes the rest of the code below more concise.
@@ -361,8 +401,22 @@ def show_route(route_source, column, route_number, generated_route=None):
             st.info("Select or upload a GPX file to display a route.")
         else: # Starts once a GPX is available
             route_gdf = load_uploaded_route(gpx_bytes)
+            full_reference = None
+            if route_number == 1 and st.sidebar.checkbox("Use reference segment", value=False): # User wants to use segment only
+                full_reference = route_gdf # Keep the whole route in the background of the map
+                selected = select_reference_segment(route_gdf, gpx_bytes, gpx_name)
+                if selected is None:
+                    return None
+                gpx_bytes, gpx_name, route_gdf = selected # All following steps now use the segment as GPX. Tuple unpacking
             st.success(labels["gpx_message"] + gpx_name) # Display success banner in UI
             traces: list[go.Scattermap] = []
+            if full_reference is not None:
+                longitudes, latitudes = [], []
+                for coordinate in full_reference.geometry.iloc[0].coords:
+                    longitudes.append(coordinate[0])
+                    latitudes.append(coordinate[1])
+                traces.append(go.Scattermap(lon=longitudes, lat=latitudes, mode="lines",
+                                            line={"color": "grey", "width": 2}, name="Full reference route"))
             add_gpx(traces, route_gdf)
 
             if graphml_bytes is not None: # Starts once a GraphML file is available

@@ -449,6 +449,132 @@ def select_reference_segment(route, gpx_bytes, gpx_name):
     return gpx.to_xml().encode("utf-8"), name, segment_route
 
 
+# Keep the same class colours on both maps
+# Each class has a feature name, a label and a map colour
+WORLDCOVER_DISPLAY = {
+    10: ("tree_cover", "Tree cover", "#228b22"), 20: ("shrubland", "Shrubland", "#ffbb22"),
+    30: ("grassland", "Grassland", "#70c76b"), 40: ("cropland", "Cropland", "#e6d54a"),
+    50: ("built_up", "Built-up", "#e76f51"), 60: ("bare_sparse_vegetation", "Bare / sparse vegetation", "#c49a6c"),
+    70: ("snow_ice", "Snow / ice", "#ffffff"), 80: ("permanent_water", "Permanent water", "#3182bd"),
+    90: ("herbaceous_wetland", "Herbaceous wetland", "#009f75"), 95: ("mangroves", "Mangroves", "#00cf75"),
+    100: ("moss_lichen", "Moss / lichen", "#b4d79e"),
+}
+# Match each dropdown choice to its raster file
+DTM_DISPLAY = {
+    "Elevation": ("dem_path", "gedtm30_alps.tif"),
+    "Positive openness": ("positive_openness_path", "positive_openness_gedtm30_alps.tif"),
+    "Negative openness": ("negative_openness_path", "negative_openness_gedtm30_alps.tif"),
+    "Terrain roughness (SSDoN)": ("ssdon_path", "ssdon_gedtm30_alps.tif"),
+}
+
+
+@st.cache_data(max_entries=10)
+def display_points(gpx_bytes):
+    route = load_uploaded_route(gpx_bytes)
+    points = resample_route(route, spacing_metres=30) # Enough detail without plotting every GPX point
+    distance = np.arange(len(points), dtype=float) * 30 / 1000 # 0, 0.03, 0.06 km and so on
+    # The last step may be shorter than 30 m, so use the real route length here
+    distance[-1] = route.to_crs(route.estimate_utm_crs()).length.sum() / 1000
+    return points, distance
+
+
+@st.cache_data(max_entries=20) # More cache entries allowed because every combination of GPX and raster file needs its own cache entry
+def display_raster_values(gpx_bytes, raster_path):
+    points, distance = display_points(gpx_bytes)
+    with rasterio.open(raster_path) as raster:
+        values = get_finish_heights_from_dem(points, raster) # This also handles missing raster values
+    return np.array(values) # Makes it easy to pick out valid values later
+
+
+@st.cache_data(max_entries=10)
+def display_worldcover(gpx_bytes, year, buffer_metres):
+    # The existing function downloads missing tiles and calculates buffered area shares
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / "display.gpx"
+        path.write_bytes(gpx_bytes) # This file disappears when the temporary folder closes
+        shares = extract_worldcover_features(path, buffer_metres=buffer_metres, worldcover_year=year)
+    points, distance = display_points(gpx_bytes)
+    classes = np.full(len(points), np.nan) # Start with missing values until a tile supplies a class
+    for path in sorted(Path("../data/raw/worldcover").glob("ESA_WorldCover_10m_" + str(year) + "_*_Map.tif")):
+        with rasterio.open(path) as raster:
+            projected = points.to_crs(raster.crs) # Compare the route and tile in the same coordinates
+            left, bottom, right, top = projected.total_bounds # Extract GPX bounding box
+            if right < raster.bounds.left or left > raster.bounds.right or top < raster.bounds.bottom or bottom > raster.bounds.top:
+                continue # Do not read tiles from another area
+            # Despite its name, this helper can read land-cover codes too
+            values = get_finish_heights_from_dem(points, raster)
+            for index, value in enumerate(values):
+                if value in WORLDCOVER_DISPLAY: # Ignore missing or unknown class codes
+                    classes[index] = value
+    return classes, shares # Point classes for the map, area shares for the table
+
+
+def add_display_layer(traces, gpx_bytes, layer, dtm_name, column):
+    try:
+        points, distance = display_points(gpx_bytes)
+        points = points.to_crs("EPSG:4326") # Latitude, longitude
+        if layer == "WorldCover":
+            options = FEATURE_OPTIONS["worldcover"]
+            classes, shares = display_worldcover(gpx_bytes, options["worldcover_year"], options["buffer_metres"])
+            rows = [] # Collect the table rows while adding the map colours
+            for code, (name, label, colour) in WORLDCOVER_DISPLAY.items():
+                selected = points[classes == code] # One colour for all points of this class
+                if not selected.empty: # No need to add a legend entry for an absent class
+                    traces.append(go.Scattermap(lon=selected.geometry.x, lat=selected.geometry.y,
+                                                mode="markers", name=label, marker={"color": colour, "size": 6}))
+                if shares.get(name, 0) > 0: # Leave zero-share classes out of the table
+                    rows.append({"WorldCover class": label, "Share (%)": shares[name] * 100}) # Turn fractions into percentages
+            if not np.isfinite(classes).all():
+                column.warning("WorldCover coverage is incomplete; uncoloured sections have no class data.")
+            return rows
+
+        # DTM layer
+        option, filename = DTM_DISPLAY[dtm_name] # Pick the raster for the selected DTM view
+        path = FEATURE_OPTIONS["dtm"].get(option, Path("../data/raw/gedtm30") / filename)
+        values = display_raster_values(gpx_bytes, path)
+        valid = np.isfinite(values) # Only colour points where we actually have data
+        if not valid.any(): # No usable values at all
+            raise ValueError("No valid DTM values along this route.")
+        traces.append(go.Scattermap(lon=points.geometry.x[valid], lat=points.geometry.y[valid], mode="markers",
+                                    name=dtm_name, marker={"size": 6, "color": values[valid], "colorscale": "Viridis",
+                                    "showscale": True, "colorbar": {"title": dtm_name}}))
+        if not valid.all(): # Some points are missing, but the rest can still be shown
+            column.warning("DTM coverage is incomplete; missing values are not coloured.")
+    except Exception as error:
+        column.warning("Could not display this layer: " + str(error)) # Keep the plain route visible
+    return []
+
+
+def render_layer_map(traces, route, route_number):
+    bounds = route.to_crs("EPSG:4326").total_bounds
+    span = max(bounds[2] - bounds[0], bounds[3] - bounds[1], 0.001) # Use the larger side to choose the zoom
+    figure = go.Figure(traces) # Put the route, colours and markers onto one map
+    # Keep the satellite background, but leave more room for the profile below
+    figure.update_layout(height=520, margin={"l": 5, "r": 5, "t": 5, "b": 5},
+                         legend={"orientation": "h", "y": 1.02, "yanchor": "bottom"},
+                         map={"style": "white-bg", "zoom": max(3, min(16, 8 - np.log2(span))),
+                              "center": {"lon": (bounds[0] + bounds[2]) / 2, "lat": (bounds[1] + bounds[3]) / 2},
+                              "layers": [{"below": "traces", "sourcetype": "raster", "source": [
+                                  "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"]}]})
+    # Separate keys let both route maps appear together
+    st.plotly_chart(figure, width="stretch", key="route_map_" + str(route_number), config={"displaylogo": False})
+
+
+def show_elevation_profile(gpx_bytes, route_number):
+    try:
+        points, distance = display_points(gpx_bytes)
+        path = FEATURE_OPTIONS["dtm"].get("dem_path", Path("../data/raw/gedtm30/gedtm30_alps.tif"))
+        heights = display_raster_values(gpx_bytes, path)
+        if not np.isfinite(heights).any():
+            raise ValueError("No valid elevation data along this route.")
+        profile = pd.DataFrame({"Distance (km)": distance, "Elevation (m)": heights}) # Pair each distance with its height
+        st.line_chart(profile, x="Distance (km)", y="Elevation (m)", height=260) # Use Streamlit's simple chart
+        if not np.isfinite(heights).all():
+            st.caption("Gaps in the profile indicate missing elevation data.")  # Showing elevation profile also if elevation data is missing for some GPX points
+    except Exception as error:
+        st.warning("Could not display the elevation profile: " + str(error))
+
+
 def show_route(route_source, column, route_number, generated_route=None):
     """Load and display one route with its optional OSM graph and matching."""
     # Keep the existing labels, which Streamlit also uses to identify widgets. Configuring labels according to route_number makes the rest of the code below more concise.
@@ -526,8 +652,20 @@ def show_route(route_source, column, route_number, generated_route=None):
                 traces.append(go.Scattermap(lon=longitudes, lat=latitudes, mode="lines",
                                             line={"color": "grey", "width": 2}, name="Full reference route"))
             add_gpx(traces, route_gdf)
+            layer_rows = []
+            selected_tag = "None"
+            matched_edges = None
+            if full_reference is not None:
+                traces[-1].line.color = "purple" # Make the selected reference segment easy to spot
+                traces[-1].name = "Reference segment"
+            if display_layer != "OpenStreetMap":
+                layer_rows = add_display_layer(traces, gpx_bytes, display_layer, dtm_name, column)
+            if generated_route is None:
+                ends = list(route_gdf.geometry.iloc[0].coords)
+                traces.append(go.Scattermap(lon=[ends[0][0], ends[-1][0]], lat=[ends[0][1], ends[-1][1]],
+                                            mode="markers", marker={"size": 10, "color": ["blue", "green"]}, name="Start / finish"))
 
-            if graphml_bytes is not None: # Starts once a GraphML file is available
+            if graphml_bytes is not None and display_layer == "OpenStreetMap": # Match only for the OSM layer
                 osm_graph = load_uploaded_graph(graphml_bytes)
                 st.success(labels["graphml_message"] + graphml_name)
                 selected_tag = st.sidebar.selectbox(labels["tag"], ["None"] + OSM_TAGS, key="tag_" + str(route_number))
@@ -557,9 +695,12 @@ def show_route(route_source, column, route_number, generated_route=None):
                                 key="values_" + str(route_number), # Make selection specific to generated route
                             )
 
-                add_graph(traces, osm_graph)
+                if show_network: # The full network can hide the coloured route
+                    add_graph(traces, osm_graph)
                 with st.spinner("Matching GPX points to OSM edges..."): # Show in UI that matching is ongoing. Spinner stops when code execution in with-block is completed
                     matched_edges = get_matched_edges(gpx_bytes, graphml_bytes, gpx_name)
+                if selected_tag != "None" and not selected_values and selected_tag in matched_edges.columns:
+                    selected_values = sorted(matched_edges[selected_tag].dropna().astype(str).unique()) # Colour all values by default
                 add_matched_edges(traces, matched_edges, selected_tag, selected_values)
 
             if generated_route is not None and st.sidebar.checkbox("Show start, finish and waypoints", value=True):
@@ -590,7 +731,26 @@ def show_route(route_source, column, route_number, generated_route=None):
                     metric_route = route_gdf.to_crs(metric_crs)
                     distance_km = metric_route.length.sum() / 1000
                     st.metric("Distance", str(round(distance_km, 2)) + " km")
-                    render_map(traces, route_gdf)
+                    st.write(display_layer)
+                    render_layer_map(traces, route_gdf, route_number)
+                    if show_profile:
+                        show_elevation_profile(gpx_bytes, route_number)
+                    if display_layer == "WorldCover" and layer_rows: # ESA WorldCover
+                        st.write("WorldCover")
+                        st.dataframe(pd.DataFrame(layer_rows), hide_index=True, width="stretch") # Show table with WorldCover class shares
+                        st.caption("Map: classes sampled every 30 m. Table: area shares in the route buffer.")
+                    if matched_edges is not None and selected_tag in matched_edges.columns: # OSM
+                        table = matched_edges.copy()
+                        table["Tag value"] = table[selected_tag].fillna("Missing").astype(str)
+                        lengths = table.to_crs(table.estimate_utm_crs()).length
+                        if lengths.sum() > 0: # Show table with OSM tag value shares
+                            table["Share (%)"] = lengths / lengths.sum() * 100
+                            table = table.groupby("Tag value", as_index=False)["Share (%)"].sum()
+                            if selected_tag == "sac_scale":
+                                table["Tag value"] = table["Tag value"].apply(format_sac_scale)
+                            st.write("OpenStreetMap")
+                            st.dataframe(table, hide_index=True, width="stretch")
+                            st.caption("Shares of matched edge length, including missing tags.")
             else:
                 st.warning("No plottable data found.") # Only display warning that there is no data for plotting. User is able to upload a different GPX file / OSM file.
 
@@ -607,8 +767,15 @@ def show_route(route_source, column, route_number, generated_route=None):
 
 
 st.set_page_config(layout="wide") # Use entire screen width (relevant for wider screen such as my 21:9 monitor for video presentation)
-st.title("GPX route viewer")
+st.title("Trail route comparison")
 st.write("Select a saved race or upload a GPX route and an optional GraphML file.")
+# One layer choice applies to both routes, making comparison easier
+display_layer = st.sidebar.radio("Layer", ["OpenStreetMap", "WorldCover", "Digital Terrain Model"])
+dtm_name = "Elevation"
+if display_layer == "Digital Terrain Model":
+    dtm_name = st.sidebar.selectbox("DTM values", list(DTM_DISPLAY))
+show_profile = st.sidebar.checkbox("Show elevation profile", value=True)
+show_network = st.sidebar.checkbox("Show full OSM network", value=False)
 st.sidebar.header("Route")
 route_source = st.sidebar.radio("Route source", ["Upload files", "Saved race"], key="route_1_source") # Single option selection with "radio" buttons
 

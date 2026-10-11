@@ -313,7 +313,7 @@ def get_error(candidate):
 
 
 def generate_routes(graph, start, reference, attempts=100, top_k=3, seed=42,
-                    distance_range=None, end=None, feature_options=None, scales=None, group_weights=None):
+                    distance_range=None, end=None, feature_options=None, scales=None, group_weights=None, end_nodes=None):
     """Generate several routes and return the best ones."""
     if reference["distance_m"] <= 0:
         raise ValueError("Reference distance must be positive.")
@@ -332,6 +332,30 @@ def generate_routes(graph, start, reference, attempts=100, top_k=3, seed=42,
             group_weights = {"distance": 0.0, "dem": 1.0, "worldcover": 1.0, "osm": 1.0} # default weighting for non-baseline configuration
         # Check that reference values, scales and weights are valid; ignore the score
         similarity_error(reference, reference, scales=scales, group_weights=group_weights)
+
+    if end_nodes is not None:
+        finishes = []
+        for node in end_nodes:
+            if node == start or node in finishes: # Don't add the same end node twice
+                continue
+            if node not in graph:
+                raise ValueError("An automatically selected finish is missing from the OSM graph.")
+            finishes.append(node)
+        if not finishes:
+            raise ValueError("No automatic finish candidates available. Please change input parameters.") # Route generation would stop here.
+        candidates = []
+        for index, finish in enumerate(finishes):
+            # Share the attempts across finishes instead of repeating the full budget each time
+            finish_attempts = attempts // len(finishes)
+            if index < attempts % len(finishes):
+                finish_attempts = finish_attempts + 1 # Give the first finishes one extra attempt if the attempts cannot be split equally
+            routes = generate_routes(graph, start, reference, attempts=finish_attempts,
+                                     top_k=top_k, seed=seed + index, end=finish,
+                                     distance_range=(minimum_distance, maximum_distance),
+                                     feature_options=feature_options, scales=scales, group_weights=group_weights)
+            candidates.extend(routes) # Each finish also gets its direct-route check (without intermediate waypoints)
+        candidates.sort(key=get_error) # Rank by weighted overall feature error
+        return candidates[:top_k] # Keep the best routes across all finishes
 
     if end is None:
         end = start # Without a separate finish, keep the round trip

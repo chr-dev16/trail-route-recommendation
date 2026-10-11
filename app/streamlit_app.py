@@ -7,6 +7,11 @@ from shapely.ops import substring
 import pandas as pd
 import plotly.graph_objects as go
 import osmnx as ox
+import networkx as nx
+import geopandas as gpd
+import rasterio
+import numpy as np
+from shapely.geometry import Point
 from trail_route_recommendation.data.gpx import resample_route
 from trail_route_recommendation.data.osm_pruning_debugging import format_sac_scale
 from trail_route_recommendation.data.worldcover import extract_worldcover_features
@@ -188,6 +193,103 @@ def load_generation_graph(latitude, longitude, half_width, end_latitude=None, en
     return graph, graph_bytes
 
 
+def get_finish_heights_from_dem(points, dem):
+    points = points.to_crs(dem.crs) # The finish points need the same coordinate reference system as the DTM raster
+    coordinates = []
+    for point in points.geometry:
+        coordinates.append((point.x, point.y))
+    heights = []
+    for coordinate, height in zip(coordinates, dem.sample(coordinates, masked=True)): # Query the DTM
+        x, y = coordinate
+        is_outside_dem_bounds = not (dem.bounds.left <= x < dem.bounds.right and dem.bounds.bottom < y <= dem.bounds.top)
+        if is_outside_dem_bounds or np.ma.is_masked(height[0]) or not np.isfinite(height[0]):
+            heights.append(float("nan")) # Missing data must not look like sea level
+        else:
+            heights.append(float(height[0]))
+    return heights
+
+
+def get_finish_height_error(candidate): # For later use as sorting key
+    return candidate["height_error"]
+
+
+def choose_automatic_finishes(graph, start, maximum_distance, reference_route, dem_path):
+    # Only consider nodes we can reach within the maximum route length
+    distances = nx.single_source_dijkstra_path_length(graph, start, cutoff=maximum_distance, weight="length") # Calculate shortest paths between start node and all reachable nodes using Dijsktra
+    node_ids = sorted(distances) # Keep the same node order each time
+    nodes = ox.graph_to_gdfs(graph.subgraph(node_ids), nodes=True, edges=False) # Subgraph only contains reachable nodes
+
+    # Get the first and last point of the reference route (to calculate height difference)
+    coordinates = list(reference_route.geometry.iloc[0].coords)
+    reference_ends = gpd.GeoDataFrame(geometry=[Point(coordinates[0]), Point(coordinates[-1])], crs=reference_route.crs)
+    with rasterio.open(dem_path) as dem:
+        reference_heights = get_finish_heights_from_dem(reference_ends, dem)
+        node_heights = get_finish_heights_from_dem(nodes, dem) # Read all reachable node heights in one pass
+
+    # Stop if the reference endpoint heights are missing
+    if not np.isfinite(reference_heights).all():
+        raise ValueError("The reference start and/or finish are outside valid DTM coverage.")
+    target_change = reference_heights[1] - reference_heights[0] # Height at finish minus height at start
+
+    # Store each height under its node ID so we can look it up later
+    heights = {}
+    for node_id, height in zip(nodes.index, node_heights):
+        heights[node_id] = height
+    if not np.isfinite(heights[start]):
+        raise ValueError("The chosen start is outside valid DTM coverage.")
+
+    candidates = []
+    for node_id in node_ids:
+        # Skip the start, zero-length connections and missing heights
+        if node_id == start or distances[node_id] <= 0 or not np.isfinite(heights[node_id]):
+            continue
+        change = heights[node_id] - heights[start]
+        # Smaller error means the height change is closer to the reference
+        candidates.append({"node": node_id, "height_error": abs(change - target_change)})
+    candidates.sort(key=get_finish_height_error) # Best height match comes first
+    if not candidates:
+        raise ValueError("No reachable finish with valid elevation data found.")
+
+    # Keep a height match first, then try other places and heights as well
+    metric_nodes = nodes.to_crs(nodes.estimate_utm_crs()) # Measure separation in metres
+    positions = {} # Save spatial position of each node to facilitate spatial diversity later
+    valid_heights = []
+    for candidate in candidates:
+        node_id = candidate["node"]
+        positions[node_id] = metric_nodes.loc[node_id].geometry
+        valid_heights.append(heights[node_id])
+
+    # Scale height differences; use at least 100 m even in a fairly flat area
+    height_scale = max(100.0, max(valid_heights) - min(valid_heights))
+    finishes = [candidates[0]["node"]] # Start with the best reference-height match
+
+    while len(finishes) < 5:
+        best_node, best_score = None, -1.0
+        for candidate in candidates:
+            node_id = candidate["node"]
+            if node_id in finishes:
+                continue # This finish is already selected
+            diversity_score = float("inf")
+
+            # Compare this candidate with every finish selected so far
+            for finish in finishes:
+                separation = positions[node_id].distance(positions[finish]) # Distance in meters
+                if separation < 500:
+                    diversity_score = -1.0 # Do not fill all places with nearby nodes (spatial diversity!)
+                    break
+                # Combine distance apart and height difference on comparable scales
+                difference = separation / maximum_distance + abs(heights[node_id] - heights[finish]) / height_scale
+                diversity_score = min(diversity_score, difference) # Keep the smallest difference to any selected finish (case of least spatial diversity) --> Larger values of diversity_score are better
+
+            # Prefer a candidate that differs from all previously selected finishes
+            if diversity_score > best_score:
+                best_node, best_score = node_id, diversity_score
+        if best_node is None:
+            break # No more candidates meet the spacing rule. Less than five finishes might be selected
+        finishes.append(best_node)
+    return finishes # Can contain fewer than five nodes
+
+
 def select_generated_route(reference):
     if reference is None:
         st.info("Select Route 1 before generating a route.")
@@ -201,9 +303,11 @@ def select_generated_route(reference):
                                        value=47.40881, format="%.5f")
     longitude = st.sidebar.number_input("Start longitude", min_value=-180.0, max_value=180.0,
                                         value=10.29202, format="%.5f")
-    mode = st.sidebar.selectbox("Finish", ["Round trip", "Choose coordinates"])
+    finish_mode = st.sidebar.selectbox("Finish", ["Round trip", "Choose coordinates", "Automatic finish"])
     end_latitude, end_longitude = None, None # A round trip ends at the start
-    if mode == "Choose coordinates":
+    if finish_mode == "Automatic finish":
+        st.sidebar.caption("Compare reachable finishes using reference height change and different locations.")
+    if finish_mode == "Choose coordinates":
         end_latitude = st.sidebar.number_input("Finish latitude", min_value=-89.0, max_value=89.0,
                                                value=47.40881, format="%.5f")
         end_longitude = st.sidebar.number_input("Finish longitude", min_value=-180.0, max_value=180.0,
@@ -224,14 +328,14 @@ def select_generated_route(reference):
     if dem_weight + wc_weight + osm_weight == 0:
         st.warning("Select at least one positive feature weight.")
         return None
-    st.sidebar.caption(mode + ": " + str(minimum) + "-" + str(maximum)
-                       + " km. Search matches DTM, WorldCover and OSM, with a penalty for repetition above 10%.")
+    st.sidebar.caption(finish_mode + ": " + str(minimum) + "-" + str(maximum)
+                       + " km. Search uses DTM, WorldCover and OSM similarity, with a penalty for edge repetition above 10%.")
     if minimum > maximum: # Stop here if the range does not make sense
         st.warning("Minimum distance must not exceed maximum distance.")
         return None
     # Saving the settings which were used for these routes
     settings = (reference["gpx_bytes"], latitude, longitude, half_width, attempts, seed, minimum, maximum,
-                mode, end_latitude, end_longitude, reference["graphml_bytes"],
+                finish_mode, end_latitude, end_longitude, reference["graphml_bytes"],
                 dem_weight, wc_weight, osm_weight) # Changed weights also need a new search
     if st.sidebar.button("Generate routes"): # Below runs once user starts route generation
         st.session_state.pop("generated_result", None)  # Old results are cleared before re-start
@@ -248,13 +352,17 @@ def select_generated_route(reference):
                 # Find the nearest point in the OSM network.
                 start_node = ox.distance.nearest_nodes(graph, X=longitude, Y=latitude)
                 end_node = start_node
-                if mode == "Choose coordinates":
+                finishes = None
+                if finish_mode == "Automatic finish":
+                    dem_path = FEATURE_OPTIONS["dtm"].get("dem_path", Path("../data/raw/gedtm30/gedtm30_alps.tif"))
+                    finishes = choose_automatic_finishes(graph, start_node, maximum * 1000, reference_route, dem_path)
+                if finish_mode == "Choose coordinates":
                     end_node = ox.distance.nearest_nodes(graph, X=end_longitude, Y=end_latitude)
                     if end_node == start_node: # Both coordinates ended up at the same OSM node
                         raise ValueError("Start and finish are too close. Choose another finish or use Round trip.")
                 # Compare valid routes by their features before choosing the best three
                 candidates = generate_routes(graph, start_node, reference_features,
-                                             attempts=attempts, seed=seed, end=end_node,
+                                             attempts=attempts, seed=seed, end=end_node, end_nodes=finishes,
                                              feature_options=options, scales=scales, group_weights=groups,
                                              distance_range=(minimum * 1000, maximum * 1000)) # Convert km to metres
                 # Prepare a GPX file for each route.
